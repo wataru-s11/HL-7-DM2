@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import logging
 import sys
@@ -33,12 +34,13 @@ def main() -> int:
         logger.error("failed to read image: %s", image_path)
         return 1
 
-    blob = dm_decoder.decode_datamatrix(image)
-    if blob is None:
+    blob_text_bytes = dm_decoder.decode_datamatrix(image)
+    if blob_text_bytes is None:
         logger.error("failed to decode DataMatrix blob from image: %s", image_path)
         return 1
 
     try:
+        blob = base64.b64decode(blob_text_bytes.decode("utf-8"))
         payload = dm_codec.decode_payload(blob)
     except Exception as exc:
         logger.error("failed to decode payload: %s", exc)
