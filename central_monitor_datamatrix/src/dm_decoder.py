@@ -1,36 +1,38 @@
 from __future__ import annotations
 
+import cv2
 import numpy as np
 
+
 try:
-    import zxingcpp
+    _BARCODE_DETECTOR = cv2.barcode_BarcodeDetector()
 except Exception:  # pragma: no cover
-    zxingcpp = None
-
-
-def _to_bytes(result: object) -> bytes | None:
-    raw = getattr(result, "bytes", None)
-    if isinstance(raw, (bytes, bytearray)):
-        return bytes(raw)
-
-    text = getattr(result, "text", None)
-    if isinstance(text, str):
-        return text.encode("utf-8")
-
-    return None
+    _BARCODE_DETECTOR = None
 
 
 def decode_datamatrix(image_bgr: np.ndarray) -> bytes | None:
-    if zxingcpp is None:
+    if _BARCODE_DETECTOR is None:
         return None
 
     if image_bgr is None or image_bgr.size == 0:
         return None
 
-    results = zxingcpp.read_barcodes(image_bgr)
-    if not results:
+    try:
+        ok, decoded_info, decoded_types, _ = _BARCODE_DETECTOR.detectAndDecode(image_bgr)
+    except Exception:
         return None
 
-    datamatrix_format = getattr(getattr(zxingcpp, "BarcodeFormat", None), "DataMatrix", None)
-    prioritized = next((r for r in results if getattr(r, "format", None) == datamatrix_format), results[0])
-    return _to_bytes(prioritized)
+    if not ok:
+        return None
+
+    for text, code_type in zip(decoded_info, decoded_types):
+        if code_type != "DATAMATRIX":
+            continue
+        if not text:
+            continue
+        try:
+            return text.encode("utf-8")
+        except Exception:
+            return None
+
+    return None

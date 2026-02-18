@@ -2,4 +2,4 @@
 numpy
 opencv-python
 pillow
-zxing-cpp
+zint-bindings
