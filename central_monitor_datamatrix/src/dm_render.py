@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import math
 
 from PIL import Image
 
@@ -25,6 +26,8 @@ def render_datamatrix(data: bytes, size_px: int = 320) -> Image.Image:
 
     bitmap_len: int | str = "n/a"
     width: int | str = "n/a"
+    height: int | str = "n/a"
+    head_hex = "n/a"
     reason = "unknown"
 
     try:
@@ -36,43 +39,80 @@ def render_datamatrix(data: bytes, size_px: int = 320) -> Image.Image:
         symbol.buffer()
 
         bm = symbol.bitmap
-        w = int(symbol.width)
 
         bitmap_len = len(bm) if bm is not None else 0
-        width = w
+        if bm:
+            head_hex = bytes(bm[:16]).hex()
 
         if not bm:
             reason = "empty bitmap from zint.Symbol.bitmap"
             raise ValueError(reason)
 
-        if w <= 0:
-            reason = f"invalid symbol width: {w}"
-            raise ValueError(reason)
-
-        selected_channels = None
+        w = None
         h = None
-        for c in (4, 3, 1):
-            row_bytes = w * c
-            if row_bytes > 0 and bitmap_len % row_bytes == 0:
-                selected_channels = c
-                h = bitmap_len // row_bytes
-                break
 
-        if selected_channels is None or h is None or h <= 0:
+        bitmap_w = getattr(symbol, "bitmap_width", None)
+        bitmap_h = getattr(symbol, "bitmap_height", None)
+        if bitmap_w is not None and bitmap_h is not None:
+            w = int(bitmap_w)
+            h = int(bitmap_h)
+        else:
+            symbol_w = getattr(symbol, "width", None)
+            symbol_h = getattr(symbol, "rows", None)
+            if symbol_h is None:
+                symbol_h = getattr(symbol, "height", None)
+
+            if symbol_w is not None and symbol_h is not None:
+                w = int(symbol_w)
+                h = int(symbol_h)
+
+        width = w if w is not None else "n/a"
+        height = h if h is not None else "n/a"
+
+        if w is None or h is None or w <= 0 or h <= 0:
             reason = (
-                f"failed to infer channels/height for bitmap; "
-                f"candidates=(4,3,1), width={w}, len(bitmap)={bitmap_len}"
+                "failed to infer bitmap dimensions from symbol attributes "
+                f"(bitmap_width/bitmap_height or width/rows(height)); got w={w}, h={h}"
             )
             raise ValueError(reason)
 
-        mode = {4: "RGBA", 3: "RGB", 1: "L"}[selected_channels]
-        image = Image.frombytes(mode, (w, h), bm)
+        if bitmap_len == w * h * 4:
+            image = Image.frombytes("RGBA", (w, h), bytes(bm))
+        elif bitmap_len == w * h * 3:
+            image = Image.frombytes("RGB", (w, h), bytes(bm))
+        elif bitmap_len == w * h:
+            image = Image.frombytes("L", (w, h), bytes(bm))
+        elif bitmap_len == math.ceil(w / 8) * h:
+            row_bytes = math.ceil(w / 8)
+            unpacked = bytearray(w * h)
+            src = bytes(bm)
+            for row in range(h):
+                row_start = row * row_bytes
+                for col in range(w):
+                    byte_idx = row_start + (col // 8)
+                    bit_shift = 7 - (col % 8)
+                    bit = (src[byte_idx] >> bit_shift) & 0x01
+                    unpacked[row * w + col] = 255 if bit else 0
+            image = Image.frombytes("L", (w, h), bytes(unpacked))
+        else:
+            reason = (
+                "failed to infer bitmap format from dimensions "
+                f"(w={w}, h={h}, len(bitmap)={bitmap_len})"
+            )
+            raise ValueError(reason)
+
         return image.convert("L").resize((size_px, size_px), resample=Image.NEAREST)
     except Exception as exc:
         if reason == "unknown":
             reason = str(exc)
-        logger.exception("DataMatrix render failed")
+        logger.exception(
+            "DataMatrix render failed: w=%s h=%s len(bitmap)=%s head16=%s",
+            width,
+            height,
+            bitmap_len,
+            head_hex,
+        )
         raise RuntimeError(
             f"DataMatrix render failed: {exc} "
-            f"(len(bitmap)={bitmap_len}, s.width={width}, reason={reason})"
+            f"(w={width}, h={height}, len(bitmap)={bitmap_len}, head16={head_hex}, reason={reason})"
         ) from exc
