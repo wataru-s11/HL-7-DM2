@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import base64
 import logging
-import os
-import tempfile
 
 from PIL import Image
 
@@ -25,28 +23,56 @@ def render_datamatrix(data: bytes, size_px: int = 320) -> Image.Image:
         logger.error(message)
         raise RuntimeError(message)
 
-    temp_path: str | None = None
+    bitmap_len: int | str = "n/a"
+    width: int | str = "n/a"
+    reason = "unknown"
+
     try:
         symbol = Symbol()
         symbol.symbology = Symbology.DATAMATRIX
 
         payload_text = base64.b64encode(data).decode("ascii")
-
-        fd, temp_path = tempfile.mkstemp(suffix=".png")
-        os.close(fd)
-
-        symbol.outfile = temp_path
         symbol.encode(payload_text)
+        symbol.buffer()
 
-        with Image.open(temp_path) as image:
-            rendered = image.convert("L")
-            return rendered.resize((size_px, size_px), resample=Image.NEAREST)
+        bm = symbol.bitmap
+        w = int(symbol.width)
+
+        bitmap_len = len(bm) if bm is not None else 0
+        width = w
+
+        if not bm:
+            reason = "empty bitmap from zint.Symbol.bitmap"
+            raise ValueError(reason)
+
+        if w <= 0:
+            reason = f"invalid symbol width: {w}"
+            raise ValueError(reason)
+
+        selected_channels = None
+        h = None
+        for c in (4, 3, 1):
+            row_bytes = w * c
+            if row_bytes > 0 and bitmap_len % row_bytes == 0:
+                selected_channels = c
+                h = bitmap_len // row_bytes
+                break
+
+        if selected_channels is None or h is None or h <= 0:
+            reason = (
+                f"failed to infer channels/height for bitmap; "
+                f"candidates=(4,3,1), width={w}, len(bitmap)={bitmap_len}"
+            )
+            raise ValueError(reason)
+
+        mode = {4: "RGBA", 3: "RGB", 1: "L"}[selected_channels]
+        image = Image.frombytes(mode, (w, h), bm)
+        return image.convert("L").resize((size_px, size_px), resample=Image.NEAREST)
     except Exception as exc:
+        if reason == "unknown":
+            reason = str(exc)
         logger.exception("DataMatrix render failed")
-        raise RuntimeError(f"DataMatrix render failed: {exc}") from exc
-    finally:
-        if temp_path:
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
+        raise RuntimeError(
+            f"DataMatrix render failed: {exc} "
+            f"(len(bitmap)={bitmap_len}, s.width={width}, reason={reason})"
+        ) from exc
