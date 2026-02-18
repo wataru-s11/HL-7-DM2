@@ -6,7 +6,7 @@ HL7受信で得たベッド別vitalsを、PHIを含まないDataMatrixペイロ�
 
 - `src/dm_payload.py`: PHIなしpayload生成、`schema_version`、`SeqCounter`
 - `src/dm_codec.py`: CRC32付与/検証、圧縮エンコード/デコード
-- `src/dm_render.py`: `pylibdmtx` でDataMatrix生成
+- `src/dm_render.py`: `zint-bindings` でDataMatrix生成
 - `src/dm_decoder.py`: ROI画像からDataMatrixデコード
 - `src/capture_and_decode.py`: PNG/フォルダ入力→デコード→CRC検証→JSONL追記
 - `src/monitor.py`: 右下DataMatrix常時表示を組み込み
@@ -23,23 +23,14 @@ HL7受信で得たベッド別vitalsを、PHIを含まないDataMatrixペイロ�
 
 `encode_payload()` 時に `crc32`（8桁大文字HEX）が付与され、圧縮バイナリ化されます。
 
-## DataMatrix依存 (`pylibdmtx`)
+## DataMatrix依存 (`zint-bindings`)
 
 ```bash
 pip install -r requirements.txt
 ```
 
-- Linux (Debian/Ubuntu) 例:
-  - `sudo apt-get install libdmtx0b libdmtx-dev`
-- Windows 例:
-  - `pip install pylibdmtx`
-  - `libdmtx` DLL (`dmtx.dll`等) をPATHが通る場所へ配置
-
-### Windowsでの典型的なDLLエラー
-
-- `ImportError: Unable to find dmtx shared library` が出る場合、`libdmtx` DLL未配置が原因です。
-- Python本体と同じbit数(64bit/32bit)のDLLを使用してください。
-- PowerShell再起動後、`python -c "from pylibdmtx.pylibdmtx import encode, decode; print('ok')"` で確認できます。
+- `zint-bindings` と `Pillow` を使ってDataMatrix PNGを生成します。
+- `render_datamatrix()` は `zint.Symbol(Symbology.DATAMATRIX)` を使用します。
 
 ## 動作確認手順（最小）
 
