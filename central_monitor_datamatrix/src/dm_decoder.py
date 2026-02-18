@@ -2,37 +2,39 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
-
-
-try:
-    _BARCODE_DETECTOR = cv2.barcode_BarcodeDetector()
-except Exception:  # pragma: no cover
-    _BARCODE_DETECTOR = None
+import zxingcpp
 
 
 def decode_datamatrix(image_bgr: np.ndarray) -> bytes | None:
-    if _BARCODE_DETECTOR is None:
-        return None
-
     if image_bgr is None or image_bgr.size == 0:
         return None
 
     try:
-        ok, decoded_info, decoded_types, _ = _BARCODE_DETECTOR.detectAndDecode(image_bgr)
+        if image_bgr.ndim == 3:
+            image_gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        else:
+            image_gray = image_bgr
+
+        results = zxingcpp.read_barcodes(image_gray)
     except Exception:
         return None
 
-    if not ok:
+    if not results:
         return None
 
-    for text, code_type in zip(decoded_info, decoded_types):
-        if code_type != "DATAMATRIX":
-            continue
-        if not text:
-            continue
-        try:
-            return text.encode("utf-8")
-        except Exception:
-            return None
+    selected = None
+    for result in results:
+        if result.format == zxingcpp.BarcodeFormat.DataMatrix:
+            selected = result
+            break
 
-    return None
+    if selected is None:
+        selected = results[0]
+
+    if not selected.text:
+        return None
+
+    try:
+        return selected.text.encode("utf-8")
+    except Exception:
+        return None
