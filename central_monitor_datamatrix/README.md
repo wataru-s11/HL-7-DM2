@@ -1,94 +1,90 @@
 # central_monitor_datamatrix
 
-HL7受信で得たベッド別vitalsを、PHIを含まないDataMatrixペイロードに変換し、監視GUI右下へ表示・院外PC側でデコードしてJSONL保存する最小実装です。
+HL7受信で得たベッド別vitalsを、PHIを含まないDataMatrixペイロードに変換し、監視GUI右下へ表示・スクショ画像からデコードしてJSONL保存する最小実装です。
 
-## ディレクトリ
+## 追加/主要ファイル
 
-```
-central_monitor_datamatrix/
-  src/
-    hl7_sender.py
-    hl7_receiver.py
-    hl7_parser.py
-    generator.py
-    monitor.py
-    dm_payload.py
-    dm_codec.py
-    dm_render.py
-    dm_decoder.py
-    capture_and_decode.py
-  dataset/
-  requirements.txt
-```
+- `src/dm_payload.py`: PHIなしpayload生成、`schema_version`、`SeqCounter`
+- `src/dm_codec.py`: CRC32付与/検証、圧縮エンコード/デコード
+- `src/dm_render.py`: `pylibdmtx` でDataMatrix生成
+- `src/dm_decoder.py`: ROI画像からDataMatrixデコード
+- `src/capture_and_decode.py`: PNG/フォルダ入力→デコード→CRC検証→JSONL追記
+- `src/monitor.py`: 右下DataMatrix常時表示を組み込み
 
 ## ペイロード仕様（PHIなし）
 
-`dm_payload.make_payload` は以下キーを出力します。
+`make_payload(monitor_cache, seq)` は以下キーを返します。
 
-- `v`: schema_version (int)
-- `ts`: payload生成時刻 (ISO8601)
-- `seq`: monitor更新ごとの連番
-- `beds`: ベッドごとの最小vitals情報（`value`, `unit`, `flag`, `ts`）
-- `crc32`: CRC32（payload本体から計算）
+- `v`: schema version
+- `ts`: ISO8601時刻
+- `seq`: 更新連番
+- `beds`: `{bed_id: {"vitals": {...}}}`
+- vitals項目は数値化可能な`value`のみ採用し、`unit/flag/status`は存在時のみ採用
 
-> `monitor_cache` に `patient` 情報があっても payload には含めません。
+`encode_payload()` 時に `crc32`（8桁大文字HEX）が付与され、圧縮バイナリ化されます。
 
-## DataMatrixライブラリ
-
-第一候補は `pylibdmtx`（libdmtx依存）です。
-
-- Linux例（Debian/Ubuntu）:
-  - `sudo apt-get install libdmtx0b libdmtx-dev`
-- Windows例:
-  - `pylibdmtx` + libdmtx DLL をPATHに配置
-
-もし `pylibdmtx` が環境で利用できない場合も、**DataMatrixを維持**するために `libdmtx` をシステム導入する方針を推奨します（QRへの置換はしません）。
-
-## 実行手順（最小）
-
-1. 依存インストール
+## DataMatrix依存 (`pylibdmtx`)
 
 ```bash
-cd central_monitor_datamatrix
 pip install -r requirements.txt
 ```
 
-2. receiver起動（HL7受信して monitor_cache.json を更新）
+- Linux (Debian/Ubuntu) 例:
+  - `sudo apt-get install libdmtx0b libdmtx-dev`
+- Windows 例:
+  - `pip install pylibdmtx`
+  - `libdmtx` DLL (`dmtx.dll`等) をPATHが通る場所へ配置
 
-```bash
-python src/hl7_receiver.py --host 0.0.0.0 --port 2575 --cache monitor_cache.json
-```
+### Windowsでの典型的なDLLエラー
 
-3. generator起動（テストHL7送信）
+- `ImportError: Unable to find dmtx shared library` が出る場合、`libdmtx` DLL未配置が原因です。
+- Python本体と同じbit数(64bit/32bit)のDLLを使用してください。
+- PowerShell再起動後、`python -c "from pylibdmtx.pylibdmtx import encode, decode; print('ok')"` で確認できます。
+
+## 動作確認手順（最小）
+
+1) generator起動
 
 ```bash
 python src/generator.py --host 127.0.0.1 --port 2575 --interval 1.0
 ```
 
-4. monitor起動（GUI表示 + 右下DataMatrixオーバーレイ）
+2) receiver起動
+
+```bash
+python src/hl7_receiver.py --host 0.0.0.0 --port 2575 --cache monitor_cache.json
+```
+
+3) monitor起動（右下DataMatrix表示）
 
 ```bash
 python src/monitor.py --cache monitor_cache.json --interval-ms 1000
 ```
 
-5. monitor画面のスクリーンショットPNGを作成して decode
+4) monitor画面をPNGスクショ保存
+
+5) スクショからデコードしてJSONL追記
 
 ```bash
-python src/capture_and_decode.py --image /path/to/screenshot.png --output-root dataset
+python src/capture_and_decode.py --input /path/to/screenshot.png --out dataset/dm_results.jsonl
 ```
 
-またはフォルダ最新N枚:
+6) 出力確認
 
-```bash
-python src/capture_and_decode.py --image-dir /path/to/screenshots --latest-n 10 --output-root dataset
-```
+- `dataset/dm_results.jsonl` に1行JSONで追記
+- CRC一致時のみ保存（`crc_ok: true`）
 
-6. 出力確認
+## `capture_and_decode.py` CLI
 
-- `dataset/YYYYMMDD/dm_results.jsonl` にレコード追記
-- CRC32が一致したpayloadのみ保存（不一致は警告ログ）
+- `--input <png path or folder>`: 単一画像またはフォルダ
+- `--out <jsonl path>`: 出力先
+- `--roi "x,y,w,h"` (任意): 明示ROI
+- `--last N`: フォルダ入力時の最新N枚（デフォルト10）
 
-## 注意
+`--roi`未指定時は**右下25%×25%**を自動ROIとして使用します。
 
-- PHI（患者ID、氏名、生年月日）はDataMatrix payloadへ含めません。
-- 失敗時（decode不能、CRC不一致）はjsonl保存せずログ出力します。
+## 表示座標のデフォルト
+
+- DataMatrix表示位置: `monitor.py` の右下固定
+- 余白: 右20px / 下20px
+- サイズ: 280x280 px

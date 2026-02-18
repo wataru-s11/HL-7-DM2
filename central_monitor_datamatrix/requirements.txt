@@ -1,3 +1,4 @@
+# DataMatrix render/decode pipeline dependencies
 numpy
 opencv-python
 pillow

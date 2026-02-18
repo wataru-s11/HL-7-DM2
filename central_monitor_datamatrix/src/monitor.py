@@ -10,7 +10,7 @@ from tkinter import ttk
 from PIL import ImageTk
 
 from dm_codec import encode_payload
-from dm_payload import make_payload
+from dm_payload import SeqCounter, make_payload
 from dm_render import render_datamatrix
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ class MonitorApp:
         self.root = root
         self.cache_path = cache_path
         self.interval_ms = interval_ms
-        self.seq = 0
+        self.seq_counter = SeqCounter()
         self.dm_photo = None
 
         self.root.title("Central Monitor + DataMatrix")
@@ -56,10 +56,10 @@ class MonitorApp:
         self.text.insert(tk.END, "".join(lines))
 
     def _update_datamatrix(self, cache: dict) -> None:
-        self.seq += 1
-        payload = make_payload(cache, seq=self.seq, schema_version=1)
+        seq = self.seq_counter.next()
+        payload = make_payload(cache, seq=seq)
         blob = encode_payload(payload)
-        dm_img = render_datamatrix(blob, size=280)
+        dm_img = render_datamatrix(blob, size_px=280)
         self.dm_photo = ImageTk.PhotoImage(dm_img)
         self.dm_label.configure(image=self.dm_photo)
 
