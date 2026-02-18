@@ -1,42 +1,82 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict
-
-from dm_codec import add_crc32
+from typing import Any
 
 
-_ALLOWED_VITAL_KEYS = {"value", "unit", "flag"}
+schema_version = 1
 
 
-def _sanitize_vitals(vitals: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    clean: Dict[str, Dict[str, Any]] = {}
-    for code, item in vitals.items():
-        if not isinstance(item, dict):
+class SeqCounter:
+    def __init__(self, start: int = 0) -> None:
+        self._value = start
+
+    def next(self) -> int:
+        self._value += 1
+        return self._value
+
+
+_ALLOWED_VITAL_FIELDS = ("value", "unit", "flag", "status")
+
+
+def _to_numeric(value: Any) -> int | float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            num = float(text)
+        except ValueError:
+            return None
+        return int(num) if num.is_integer() else num
+    return None
+
+
+def _sanitize_vitals(vitals: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for vital_code, vital_raw in vitals.items():
+        if not isinstance(vital_raw, dict):
             continue
-        minimal = {k: item[k] for k in _ALLOWED_VITAL_KEYS if k in item}
-        if minimal:
-            clean[code] = minimal
-    return clean
+
+        numeric = _to_numeric(vital_raw.get("value"))
+        if numeric is None:
+            continue
+
+        clean_vital: dict[str, Any] = {"value": numeric}
+        for field in _ALLOWED_VITAL_FIELDS[1:]:
+            value = vital_raw.get(field)
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            clean_vital[field] = value
+
+        result[str(vital_code)] = clean_vital
+
+    return result
 
 
-def make_payload(monitor_cache_dict: Dict[str, Any], seq: int, schema_version: int = 1) -> Dict[str, Any]:
-    """Build PHI-free payload with vitals only and CRC32."""
-    beds = monitor_cache_dict.get("beds", {}) if isinstance(monitor_cache_dict, dict) else {}
-    safe_beds: Dict[str, Dict[str, Any]] = {}
+def make_payload(monitor_cache: dict[str, Any], seq: int) -> dict[str, Any]:
+    beds: dict[str, Any] = {}
 
-    for bed_id, bed_data in beds.items():
+    for bed_id, bed_data in (monitor_cache.get("beds") or {}).items():
         if not isinstance(bed_data, dict):
             continue
-        safe_beds[bed_id] = {
-            "ts": bed_data.get("ts"),
-            "vitals": _sanitize_vitals(bed_data.get("vitals", {})),
-        }
+        vitals_raw = bed_data.get("vitals")
+        if not isinstance(vitals_raw, dict):
+            continue
 
-    payload_without_crc = {
+        vitals = _sanitize_vitals(vitals_raw)
+        if vitals:
+            beds[str(bed_id)] = {"vitals": vitals}
+
+    return {
         "v": schema_version,
         "ts": datetime.now(timezone.utc).isoformat(),
         "seq": seq,
-        "beds": safe_beds,
+        "beds": beds,
     }
-    return add_crc32(payload_without_crc)
