@@ -6,7 +6,8 @@ HL7受信で得たベッド別vitalsを、PHIを含まないDataMatrixペイロ�
 
 - `src/dm_payload.py`: PHIなしpayload生成、`schema_version`、`SeqCounter`
 - `src/dm_codec.py`: CRC32付与/検証、圧縮エンコード/デコード
-- `src/dm_render.py`: `zint-bindings` でDataMatrix生成
+- `src/dm_render.py`: 既存の `zint-bindings` ベース描画実装（`monitor.py` 側で利用）
+- `src/make_datamatrix_png.py`: `tool/zint.exe` を subprocess 実行してPNG生成
 - `src/dm_decoder.py`: ROI画像からDataMatrixデコード
 - `src/capture_and_decode.py`: PNG/フォルダ入力→デコード→CRC検証→JSONL追記
 - `src/monitor.py`: 右下DataMatrix常時表示を組み込み
@@ -23,14 +24,27 @@ HL7受信で得たベッド別vitalsを、PHIを含まないDataMatrixペイロ�
 
 `encode_payload()` 時に `crc32`（8桁大文字HEX）が付与され、圧縮バイナリ化されます。
 
-## DataMatrix依存 (`zint-bindings`)
+## DataMatrix生成（Windows: `tool/zint.exe`）
+
+`make_datamatrix_png.py` は Windows 環境での安定性を優先し、プロジェクト同梱の `tool/zint.exe` を subprocess で呼び出して PNG を生成します。
+
+- 実行ファイル: `tool/zint.exe`
+- バーコード種別: `-b 71` (DataMatrix)
+- 出力形式: `--filetype=PNG`
+- 入力データ: payloadバイナリを base64 ASCII 文字列化して `-i` のテキストファイル入力
 
 ```bash
-pip install -r requirements.txt
+python src/make_datamatrix_png.py --cache monitor_cache.json --out dataset/dm.png
 ```
 
-- `zint-bindings` と `Pillow` を使ってDataMatrix PNGを生成します。
-- `render_datamatrix()` は `zint.Symbol(Symbology.DATAMATRIX)` を使用します。
+確認コマンド例（PowerShell）:
+
+```powershell
+python src/make_datamatrix_png.py --cache monitor_cache.json --out dataset\dm.png
+Get-Item dataset\dm.png | Select-Object FullName,Length
+```
+
+> 注: `monitor.py` の画面内描画は引き続き `zint-bindings` 実装 (`dm_render.py`) を利用します。
 
 ## 動作確認手順（最小）
 
