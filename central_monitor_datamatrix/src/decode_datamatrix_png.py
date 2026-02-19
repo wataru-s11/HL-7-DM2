@@ -8,9 +8,7 @@ from pathlib import Path
 
 import cv2
 
-import dm_codec
-import dm_decoder
-import dm_payload
+import dm_datamatrix
 
 logger = logging.getLogger(__name__)
 
@@ -32,18 +30,9 @@ def main() -> int:
         logger.error("failed to read image: %s", image_path)
         return 1
 
-    blob = dm_decoder.decode_datamatrix(image)
-    if blob is None:
-        logger.error("failed to decode DataMatrix blob from image: %s", image_path)
-        return 1
-
-    logger.info("blob size=%d bytes", len(blob))
-
     try:
-        packet_bytes = dm_codec.unwrap(blob)
+        payload = dm_datamatrix.decode_payload_from_bgr_image(image)
         logger.info("CRC OK")
-        logger.info("packet size=%d bytes", len(packet_bytes))
-        payload = dm_payload.parse_packet(packet_bytes)
     except Exception as exc:
         logger.error("failed to decode payload: %s", exc)
         return 1
