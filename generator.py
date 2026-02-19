@@ -11,21 +11,46 @@ from hl7_sender import send_mllp_message
 
 logger = logging.getLogger(__name__)
 
+VITAL_SPECS = [
+    ("HR", "HeartRate", "bpm", 55, 110),
+    ("SpO2", "SpO2", "%", 90, 100),
+    ("RR", "RespRate", "rpm", 10, 24),
+    ("TEMP", "Temperature", "C", 360, 390),
+    ("SBP", "SystolicBP", "mmHg", 90, 160),
+    ("DBP", "DiastolicBP", "mmHg", 50, 100),
+    ("MAP", "MeanArterialPressure", "mmHg", 60, 120),
+    ("PR", "PulseRate", "bpm", 55, 120),
+    ("etCO2", "EndTidalCO2", "mmHg", 25, 50),
+    ("FiO2", "InspiredO2", "%", 210, 1000),
+    ("NIBP_SYS", "NIBP_Systolic", "mmHg", 90, 160),
+    ("NIBP_DIA", "NIBP_Diastolic", "mmHg", 50, 100),
+    ("NIBP_MAP", "NIBP_Mean", "mmHg", 60, 120),
+    ("CVP", "CentralVenousPressure", "mmHg", 20, 150),
+    ("ICP", "IntracranialPressure", "mmHg", 50, 250),
+    ("RESP_RATE", "RespRateMonitor", "rpm", 10, 30),
+    ("PULSE", "Pulse", "bpm", 55, 120),
+    ("CO2", "CO2", "mmHg", 250, 500),
+    ("O2_FLOW", "O2Flow", "L/min", 0, 150),
+    ("BT", "BodyTemperature", "C", 360, 390),
+]
+
 
 def build_message(bed: str, msg_id: int) -> str:
-    hr = random.randint(55, 110)
-    spo2 = random.randint(90, 100)
-    rr = random.randint(10, 24)
     now = datetime.now().strftime("%Y%m%d%H%M%S")
-    return (
+    header = (
         f"MSH|^~\\&|GEN|ICU|MON|ICU|{now}||ORU^R01|MSG{msg_id:06d}|P|2.4\r"
         "PID|1||12345||DOE^JOHN||19800101|M\r"
         f"PV1|1|I|WARD^A^{bed}\r"
         "OBR|1|||VITALS\r"
-        f"OBX|1|NM|HR^HeartRate||{hr}|bpm|||N\r"
-        f"OBX|2|NM|SPO2^SpO2||{spo2}|%|||N\r"
-        f"OBX|3|NM|RESP^RespRate||{rr}|rpm|||N\r"
     )
+
+    obx_segments: list[str] = []
+    for index, (code, label, unit, minimum, maximum) in enumerate(VITAL_SPECS, start=1):
+        value = random.randint(minimum, maximum)
+        value_text = str(value / 10) if code in {"TEMP", "FiO2", "CVP", "ICP", "CO2", "O2_FLOW", "BT", "etCO2"} else str(value)
+        obx_segments.append(f"OBX|{index}|NM|{code}^{label}||{value_text}|{unit}|||N\r")
+
+    return header + "".join(obx_segments)
 
 
 def main() -> None:
@@ -39,7 +64,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
     msg_id = 1
-    beds = ["BED01", "BED02"]
+    beds = [f"BED{i:02d}" for i in range(1, 7)]
     loop = 0
     while args.count < 0 or loop < args.count:
         for bed in beds:

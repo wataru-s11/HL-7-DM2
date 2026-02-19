@@ -11,7 +11,7 @@ def _parse_obx_segments(segments: List[str]) -> Dict[str, Dict[str, Any]]:
         if len(fields) < 7 or fields[0] != "OBX":
             continue
 
-        obs_id = fields[3].split("^")[0].strip().upper() or "UNKNOWN"
+        obs_id = fields[3].split("^")[0].strip() or "UNKNOWN"
         value_raw = fields[5].strip()
         unit = fields[6].strip() if len(fields) > 6 else ""
         flag = fields[8].strip() if len(fields) > 8 else ""
