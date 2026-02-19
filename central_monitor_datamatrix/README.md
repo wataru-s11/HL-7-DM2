@@ -4,47 +4,36 @@ HL7受信で得たベッド別vitalsを、PHIを含まないDataMatrixペイロ�
 
 ## 追加/主要ファイル
 
-- `src/dm_payload.py`: PHIなしpayload生成、`schema_version`、`SeqCounter`
-- `src/dm_codec.py`: CRC32付与/検証、圧縮エンコード/デコード
+- `src/dm_payload.py`: 6ベッド×20パラメータ固定レイアウトのバイナリpacket生成/復元
+- `src/dm_codec.py`: packetをzlib圧縮しCRC32付きblobへwrap/unwrap
 - `src/dm_render.py`: 既存の `zint-bindings` ベース描画実装（`monitor.py` 側で利用）
-- `src/make_datamatrix_png.py`: `tool/zint.exe` を subprocess 実行してPNG生成
-- `src/dm_decoder.py`: ROI画像からDataMatrixデコード
+- `src/make_datamatrix_png.py`: `tool/zint.exe` を subprocess 実行し、`--binary` でPNG生成
+- `src/dm_decoder.py`: DataMatrixからバイナリblob抽出（`result.bytes`優先）
 - `src/capture_and_decode.py`: PNG/フォルダ入力→デコード→CRC検証→JSONL追記
 - `src/monitor.py`: 右下DataMatrix常時表示を組み込み
 
-## ペイロード仕様（PHIなし）
+## 固定レイアウト仕様（version=1）
 
-`make_payload(monitor_cache, seq)` は以下キーを返します。
+- 対象ベッド: `BED01`〜`BED06`
+- 各ベッド: `PARAMS_20` の20項目を固定順序で保持
+- packet構造:
+  - header: `magic(4)=CMDM`, `version(1)=1`, `beds_count(1)=6`, `params_count(1)=20`, `reserved(1)=0`, `timestamp_ms(int64)`
+  - body: 各ベッドごとに `bed_present(uint8)` + 各パラメータ `present(uint8)` + `value(int32)`
+- 浮動小数点が必要な項目は `SCALE_MAP` で量子化（例: `TEMP` は10倍）
 
-- `v`: schema version
-- `ts`: ISO8601時刻
-- `seq`: 更新連番
-- `beds`: `{bed_id: {"vitals": {...}}}`
-- vitals項目は数値化可能な`value`のみ採用し、`unit/flag/status`は存在時のみ採用
+## zint.exe 設置
 
-`encode_payload()` 時に `crc32`（8桁大文字HEX）が付与され、圧縮バイナリ化されます。
+`make_datamatrix_png.py` は `central_monitor_datamatrix/tool/zint.exe` を直接呼び出します。  
+**zint 2.16.0 の実行ファイルを `tool/zint.exe` に配置してください。**
 
-## DataMatrix生成（Windows: `tool/zint.exe`）
-
-`make_datamatrix_png.py` は Windows 環境での安定性を優先し、プロジェクト同梱の `tool/zint.exe` を subprocess で呼び出して PNG を生成します。
-
-- 実行ファイル: `tool/zint.exe`
-- バーコード種別: `-b 71` (DataMatrix)
-- 出力形式: `--filetype=PNG`
-- 入力データ: payloadバイナリを base64 ASCII 文字列化して `-i` のテキストファイル入力
+## 生成/復号コマンド
 
 ```bash
 python src/make_datamatrix_png.py --cache monitor_cache.json --out dataset/dm.png
+python src/decode_datamatrix_png.py --image dataset/dm.png
 ```
 
-確認コマンド例（PowerShell）:
-
-```powershell
-python src/make_datamatrix_png.py --cache monitor_cache.json --out dataset\dm.png
-Get-Item dataset\dm.png | Select-Object FullName,Length
-```
-
-> 注: `monitor.py` の画面内描画は引き続き `zint-bindings` 実装 (`dm_render.py`) を利用します。
+`make_datamatrix_png.py` は blobサイズ(bytes) をINFO表示し、`decode_datamatrix_png.py` は blob/packetサイズとCRC OKをINFO表示します。
 
 ## 動作確認手順（最小）
 
@@ -78,18 +67,3 @@ python src/capture_and_decode.py --input /path/to/screenshot.png --out dataset/d
 
 - `dataset/dm_results.jsonl` に1行JSONで追記
 - CRC一致時のみ保存（`crc_ok: true`）
-
-## `capture_and_decode.py` CLI
-
-- `--input <png path or folder>`: 単一画像またはフォルダ
-- `--out <jsonl path>`: 出力先
-- `--roi "x,y,w,h"` (任意): 明示ROI
-- `--last N`: フォルダ入力時の最新N枚（デフォルト10）
-
-`--roi`未指定時は**右下25%×25%**を自動ROIとして使用します。
-
-## 表示座標のデフォルト
-
-- DataMatrix表示位置: `monitor.py` の右下固定
-- 余白: 右20px / 下20px
-- サイズ: 280x280 px
