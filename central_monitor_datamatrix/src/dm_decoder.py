@@ -31,10 +31,13 @@ def decode_datamatrix(image_bgr: np.ndarray) -> bytes | None:
     if selected is None:
         selected = results[0]
 
-    if not selected.text:
-        return None
+    if getattr(selected, "bytes", None):
+        return bytes(selected.bytes)
 
-    try:
-        return selected.text.encode("utf-8")
-    except Exception:
-        return None
+    if selected.text:
+        try:
+            return selected.text.encode("utf-8")
+        except Exception:
+            return None
+
+    return None

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import logging
 import sys
@@ -11,16 +10,15 @@ import cv2
 
 import dm_codec
 import dm_decoder
-
+import dm_payload
 
 logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Decode DataMatrix PNG and verify payload CRC32."
-    )
+    parser = argparse.ArgumentParser(description="Decode DataMatrix PNG and restore JSON payload.")
     parser.add_argument("--image", required=True, help="Path to DataMatrix image file")
+    parser.add_argument("--out-json", help="Optional output JSON file path")
     return parser.parse_args()
 
 
@@ -34,24 +32,31 @@ def main() -> int:
         logger.error("failed to read image: %s", image_path)
         return 1
 
-    blob_text_bytes = dm_decoder.decode_datamatrix(image)
-    if blob_text_bytes is None:
+    blob = dm_decoder.decode_datamatrix(image)
+    if blob is None:
         logger.error("failed to decode DataMatrix blob from image: %s", image_path)
         return 1
 
+    logger.info("blob size=%d bytes", len(blob))
+
     try:
-        blob = base64.b64decode(blob_text_bytes.decode("utf-8"))
-        payload = dm_codec.decode_payload(blob)
+        packet_bytes = dm_codec.unwrap(blob)
+        logger.info("CRC OK")
+        logger.info("packet size=%d bytes", len(packet_bytes))
+        payload = dm_payload.parse_packet(packet_bytes)
     except Exception as exc:
         logger.error("failed to decode payload: %s", exc)
         return 1
 
-    if not dm_codec.verify_crc32(payload):
-        logger.error("CRC32 verification failed")
-        return 2
+    output_json = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+    if args.out_json:
+        out = Path(args.out_json)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(output_json + "\n", encoding="utf-8")
+    else:
+        sys.stdout.write(output_json)
+        sys.stdout.write("\n")
 
-    json.dump(payload, sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
-    sys.stdout.write("\n")
     return 0
 
 
