@@ -56,12 +56,12 @@ python src/hl7_receiver.py --host 0.0.0.0 --port 2575 --cache monitor_cache.json
 cacheファイルの更新mtimeを監視し、更新時に `dataset/dm_latest.png` を再生成して表示更新します。
 
 ```bash
-python src/dm_display_app.py --cache monitor_cache.json --out dataset/dm_latest.png --interval-sec 1 --topmost --x 1400 --y 20
+python src/dm_display_app.py --cache monitor_cache.json --out dataset/dm_latest.png --interval-sec 1 --monitor-index 1 --margin-right-px 40
 ```
 
 - デフォルトサイズは `420x420` 固定
-- `--topmost` で常に前面
-- `--x --y` で配置調整
+- 既定では `--monitor-index 1` の右上に固定表示
+- `--margin-right-px` / `--margin-top-px` で表示位置を微調整
 
 ### 4) 受信側アプリ: 10秒ごとキャプチャ→decode→JSONL
 

@@ -15,10 +15,19 @@ WINDOW_HEIGHT = 420
 
 
 class DMDisplayApp:
-    def __init__(self, out_path: Path, interval_ms: int, monitor_index: int) -> None:
+    def __init__(
+        self,
+        out_path: Path,
+        interval_ms: int,
+        monitor_index: int,
+        margin_right_px: int,
+        margin_top_px: int,
+    ) -> None:
         self.out_path = out_path
         self.interval_ms = interval_ms
         self.monitor_index = monitor_index
+        self.margin_right_px = margin_right_px
+        self.margin_top_px = margin_top_px
 
         monitors = get_monitors()
         if not monitors:
@@ -29,8 +38,8 @@ class DMDisplayApp:
             )
 
         monitor = monitors[monitor_index]
-        left = monitor.x + monitor.width - WINDOW_WIDTH
-        top = monitor.y
+        left = monitor.x + monitor.width - WINDOW_WIDTH - margin_right_px
+        top = monitor.y + margin_top_px
 
         logger.info("monitor_index=%d", monitor_index)
         logger.info(
@@ -47,6 +56,7 @@ class DMDisplayApp:
             WINDOW_WIDTH,
             WINDOW_HEIGHT,
         )
+        logger.info("margins: right=%d, top=%d", margin_right_px, margin_top_px)
 
         self.root = tk.Tk()
         self.root.title("DataMatrix Display")
@@ -81,7 +91,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache", required=True, help="Path to monitor_cache.json (reserved for compatibility)")
     parser.add_argument("--out", default="dataset/dm_latest.png", help="Output PNG path")
     parser.add_argument("--interval-sec", type=float, default=1.0, help="Refresh interval seconds")
-    parser.add_argument("--monitor-index", type=int, default=1, help="Monitor index (0=primary, 1=display2)")
+    parser.add_argument("--monitor-index", type=int, default=1, help="Monitor index")
+    parser.add_argument("--margin-right-px", type=int, default=40, help="Right margin in pixels")
+    parser.add_argument("--margin-top-px", type=int, default=0, help="Top margin in pixels")
     return parser.parse_args()
 
 
@@ -93,6 +105,8 @@ def main() -> int:
         out_path=Path(args.out),
         interval_ms=max(100, int(args.interval_sec * 1000)),
         monitor_index=args.monitor_index,
+        margin_right_px=args.margin_right_px,
+        margin_top_px=args.margin_top_px,
     )
     app.run()
     return 0
