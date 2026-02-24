@@ -88,18 +88,47 @@ class DMDisplayApp:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Display latest DataMatrix image")
-    parser.add_argument("--cache", required=True, help="Path to monitor_cache.json (reserved for compatibility)")
+    parser.add_argument(
+        "--cache",
+        default="monitor_cache.json",
+        help="Path to monitor_cache.json (reserved for compatibility)",
+    )
     parser.add_argument("--out", default="dataset/dm_latest.png", help="Output PNG path")
     parser.add_argument("--interval-sec", type=float, default=1.0, help="Refresh interval seconds")
     parser.add_argument("--monitor-index", type=int, default=1, help="Monitor index")
     parser.add_argument("--margin-right-px", type=int, default=40, help="Right margin in pixels")
     parser.add_argument("--margin-top-px", type=int, default=0, help="Top margin in pixels")
+    parser.add_argument(
+        "--list-monitors",
+        action="store_true",
+        help="List monitor geometries via mss and exit",
+    )
     return parser.parse_args()
+
+
+def list_monitors() -> None:
+    import mss
+
+    with mss.mss() as sct:
+        monitors = sct.monitors
+    if not monitors:
+        print("no monitors detected")
+        return
+
+    for i, monitor in enumerate(monitors):
+        print(
+            f"monitor{i}: left={monitor['left']}, top={monitor['top']}, "
+            f"width={monitor['width']}, height={monitor['height']}"
+        )
 
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     args = parse_args()
+
+    if args.list_monitors:
+        list_monitors()
+        return 0
 
     app = DMDisplayApp(
         out_path=Path(args.out),

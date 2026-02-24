@@ -6,3 +6,4 @@ zint-bindings
 zxing-cpp
 
 screeninfo
+mss
