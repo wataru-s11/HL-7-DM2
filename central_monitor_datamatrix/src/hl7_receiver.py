@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 WRITER_LOCK_TIMEOUT_SEC = 2.0
 CACHE_WRITE_RETRIES = 20
 CACHE_WRITE_RETRY_DELAY_SEC = 0.05
+CACHE_WRITE_RETRY_MAX_DELAY_SEC = 1.0
 
 
 @dataclass
@@ -57,6 +58,14 @@ def _extract_mllp_payload(data: bytes) -> str:
     return data[start + 1 : end].decode("utf-8", errors="ignore")
 
 
+
+
+def _permission_hint(cache_path: Path) -> str:
+    return (
+        "hint: the cache file may be held by antivirus/indexer/previewer or another writer process. "
+        f"Close JSON viewers and ensure only one writer targets {cache_path.name}."
+    )
+
 def _write_cache_atomic(cache_path: Path, payload: Dict[str, Any]) -> None:
     last_exc: Exception | None = None
     for attempt in range(1, CACHE_WRITE_RETRIES + 1):
@@ -67,14 +76,18 @@ def _write_cache_atomic(cache_path: Path, payload: Dict[str, Any]) -> None:
             last_exc = exc
             if attempt >= CACHE_WRITE_RETRIES:
                 break
-            time.sleep(CACHE_WRITE_RETRY_DELAY_SEC)
+            delay = min(CACHE_WRITE_RETRY_MAX_DELAY_SEC, CACHE_WRITE_RETRY_DELAY_SEC * (2 ** (attempt - 1)))
+            time.sleep(delay)
         except TimeoutError as exc:
             last_exc = exc
             if attempt >= CACHE_WRITE_RETRIES:
                 break
-            time.sleep(CACHE_WRITE_RETRY_DELAY_SEC)
+            delay = min(CACHE_WRITE_RETRY_MAX_DELAY_SEC, CACHE_WRITE_RETRY_DELAY_SEC * (2 ** (attempt - 1)))
+            time.sleep(delay)
 
-    raise RuntimeError(f"failed to update cache after retries: {cache_path}") from last_exc
+    raise RuntimeError(
+        f"failed to update cache after retries: {cache_path}; {_permission_hint(cache_path)}"
+    ) from last_exc
 
 
 def claim_single_writer(cache_path: Path, writer_name: str) -> tuple[Path, int]:

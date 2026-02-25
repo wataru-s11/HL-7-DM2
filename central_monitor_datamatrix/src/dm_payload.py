@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 MAGIC = b"CMDM"
-VERSION = 1
+VERSION = 2
 BEDS_6 = ["BED01", "BED02", "BED03", "BED04", "BED05", "BED06"]
 PARAMS_20 = [
     "HR",
@@ -147,13 +147,21 @@ def make_payload(monitor_cache: dict[str, Any], seq: int) -> dict[str, Any]:
 
     epoch_ms = _to_epoch_ms(monitor_cache.get("epoch_ms") or monitor_cache.get("ts") or monitor_cache.get("timestamp"))
 
+    ts_value = monitor_cache.get("ts") if isinstance(monitor_cache.get("ts"), str) else _epoch_ms_to_iso(epoch_ms)
+    packet_id = int(monitor_cache.get("packet_id") or 0)
+
     return {
         "v": schema_version,
         "schema_version": schema_version,
-        "ts": monitor_cache.get("ts") if isinstance(monitor_cache.get("ts"), str) else _epoch_ms_to_iso(epoch_ms),
+        "meta": {
+            "packet_id": packet_id,
+            "epoch_ms": epoch_ms,
+            "ts": ts_value,
+        },
+        "ts": ts_value,
         "epoch_ms": epoch_ms,
         "timestamp_ms": epoch_ms,
-        "packet_id": int(monitor_cache.get("packet_id") or 0),
+        "packet_id": packet_id,
         "seq": seq,
         "beds": beds,
     }
@@ -220,7 +228,7 @@ def parse_packet(packet_bytes: bytes, beds: list[str] | None = None, params: lis
     magic, version, beds_count, params_count, _reserved, timestamp_ms, packet_id = _HEADER_STRUCT.unpack_from(packet_bytes, 0)
     if magic != MAGIC:
         raise PacketError(f"invalid magic: {magic!r}")
-    if version != VERSION:
+    if version < 1 or version > VERSION:
         raise PacketError(f"unsupported version: {version}")
     if beds_count != len(beds):
         raise PacketError(f"beds_count mismatch: {beds_count} != {len(beds)}")
@@ -249,15 +257,21 @@ def parse_packet(packet_bytes: bytes, beds: list[str] | None = None, params: lis
 
         out_beds[bed_id] = bed_payload
 
+    ts_value = _epoch_ms_to_iso(timestamp_ms)
     return {
         "magic": MAGIC.decode("ascii"),
         "version": version,
         "schema_version": version,
         "beds_count": beds_count,
         "params_count": params_count,
+        "meta": {
+            "packet_id": packet_id,
+            "epoch_ms": timestamp_ms,
+            "ts": ts_value,
+        },
         "epoch_ms": timestamp_ms,
         "timestamp_ms": timestamp_ms,
-        "ts": _epoch_ms_to_iso(timestamp_ms),
+        "ts": ts_value,
         "packet_id": packet_id,
         "beds": out_beds,
     }

@@ -100,12 +100,15 @@ def main() -> int:
             sequence += 1
 
             record = {
-                "timestamp_ms": decoded_at_ms,
+                "timestamp_ms": None,
                 "epoch_ms": None,
                 "ts": None,
                 "packet_id": None,
                 "cache_epoch_ms": None,
                 "source_packet_id": None,
+                "truth_packet_id": None,
+                "truth_epoch_ms": None,
+                "truth_ts": None,
                 "source": None,
                 "decoded_at_ms": decoded_at_ms,
                 "source_image": str(image_path),
@@ -125,9 +128,19 @@ def main() -> int:
                 image_bgr = image_rgb[:, :, ::-1]
                 payload = dm_datamatrix.decode_payload_from_bgr_image(image_bgr)
 
+                payload_meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+                truth_epoch_ms = payload_meta.get("epoch_ms")
+                if truth_epoch_ms is None:
+                    truth_epoch_ms = payload.get("epoch_ms") if payload.get("epoch_ms") is not None else payload.get("timestamp_ms")
+                truth_packet_id = payload_meta.get("packet_id") if payload_meta else payload.get("packet_id")
+                truth_ts = payload_meta.get("ts") if payload_meta else payload.get("ts")
+
                 dm_epoch_ms = payload.get("epoch_ms") if payload.get("epoch_ms") is not None else payload.get("timestamp_ms")
+                record["truth_epoch_ms"] = truth_epoch_ms
+                record["truth_packet_id"] = truth_packet_id
+                record["truth_ts"] = truth_ts
                 record["epoch_ms"] = dm_epoch_ms
-                record["timestamp_ms"] = dm_epoch_ms if dm_epoch_ms is not None else decoded_at_ms
+                record["timestamp_ms"] = truth_epoch_ms if truth_epoch_ms is not None else (dm_epoch_ms if dm_epoch_ms is not None else decoded_at_ms)
                 record["ts"] = payload.get("ts")
                 record["packet_id"] = payload.get("packet_id")
                 record["cache_epoch_ms"] = payload.get("epoch_ms")
@@ -136,8 +149,17 @@ def main() -> int:
                 record["beds"] = payload.get("beds")
                 record["decode_ok"] = True
                 record["crc_ok"] = True
-                logger.info("decoded ok: %s cache_epoch_ms=%s source_packet_id=%s source=%s", image_path, record.get("cache_epoch_ms"), record.get("source_packet_id"), record.get("source"))
+                logger.info(
+                    "decoded ok: %s truth_epoch_ms=%s truth_packet_id=%s cache_epoch_ms=%s source_packet_id=%s source=%s",
+                    image_path,
+                    record.get("truth_epoch_ms"),
+                    record.get("truth_packet_id"),
+                    record.get("cache_epoch_ms"),
+                    record.get("source_packet_id"),
+                    record.get("source"),
+                )
             except Exception as exc:
+                record["timestamp_ms"] = decoded_at_ms
                 record["error"] = str(exc)
                 logger.warning("decode failed: %s (%s)", image_path, exc)
 
