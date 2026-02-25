@@ -18,6 +18,8 @@ from hl7_parser import parse_hl7_message
 SB = b"\x0b"
 EB_CR = b"\x1c\x0d"
 logger = logging.getLogger(__name__)
+LOCK_TIMEOUT_SEC = 2.0
+LOCK_STALE_SEC = 10.0
 
 
 @dataclass
@@ -61,36 +63,80 @@ def _write_cache_atomic(cache_path: Path, payload: Dict[str, Any], *, indent: in
     )
 
 
-def _write_text_atomic_with_retry(path: Path, text: str, retries: int = 20, base_delay_sec: float = 0.05) -> None:
-    last_error: PermissionError | None = None
-    for attempt in range(1, retries + 1):
-        token = secrets.token_hex(4)
-        tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}.{attempt}.{token}")
+def _acquire_lock(lock_path: Path, timeout_sec: float = LOCK_TIMEOUT_SEC, stale_sec: float = LOCK_STALE_SEC) -> int:
+    deadline = time.time() + timeout_sec
+    while True:
         try:
-            with tmp_path.open("w", encoding="utf-8") as f:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, f"pid={os.getpid()} tid={threading.get_ident()} ts={time.time():.6f}\n".encode("utf-8"))
+            return fd
+        except FileExistsError:
+            try:
+                age_sec = time.time() - lock_path.stat().st_mtime
+                if age_sec > stale_sec:
+                    logger.warning("lock file is stale; removing and retrying: %s age=%.2fs", lock_path, age_sec)
+                    lock_path.unlink(missing_ok=True)
+                    continue
+            except FileNotFoundError:
+                continue
+            if time.time() >= deadline:
+                raise TimeoutError(f"timed out waiting for lock file: {lock_path}")
+            time.sleep(0.05)
+
+
+def _release_lock(lock_path: Path, lock_fd: int) -> None:
+    try:
+        os.close(lock_fd)
+    finally:
+        lock_path.unlink(missing_ok=True)
+
+
+def _write_text_atomic_with_retry(path: Path, text: str, retries: int = 40, base_delay_sec: float = 0.05) -> None:
+    lock_path = path.with_name(f"{path.name}.lock")
+    lock_fd = _acquire_lock(lock_path)
+    try:
+        last_error: PermissionError | None = None
+        for attempt in range(1, retries + 1):
+            token = secrets.token_hex(4)
+            tmp_path = path.with_name(
+                f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{token}"
+            )
+            try:
+                with tmp_path.open("w", encoding="utf-8") as f:
+                    f.write(text)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, path)
+                return
+            except PermissionError as exc:
+                last_error = exc
+                logger.warning(
+                    "atomic replace retry due to PermissionError: target=%s attempt=%d/%d error=%s",
+                    path,
+                    attempt,
+                    retries,
+                    exc,
+                )
+                tmp_path.unlink(missing_ok=True)
+                if attempt < retries:
+                    time.sleep(base_delay_sec)
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                raise
+
+        logger.warning("atomic replace retries exhausted; falling back to direct write: target=%s", path)
+        try:
+            with path.open("w", encoding="utf-8") as f:
                 f.write(text)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp_path, path)
-            return
-        except PermissionError as exc:
-            last_error = exc
-            logger.warning(
-                "atomic replace retry due to PermissionError: target=%s attempt=%d/%d error=%s",
-                path,
-                attempt,
-                retries,
-                exc,
-            )
-            tmp_path.unlink(missing_ok=True)
-            if attempt < retries:
-                time.sleep(base_delay_sec)
         except Exception:
-            tmp_path.unlink(missing_ok=True)
+            if last_error is not None:
+                logger.error("direct write fallback failed after atomic retries: target=%s", path)
+                raise last_error
             raise
-    assert last_error is not None
-    logger.error("atomic replace failed after retries: target=%s", path)
-    raise last_error
+    finally:
+        _release_lock(lock_path, lock_fd)
 
 
 def _handle_client(conn: socket.socket, aggregator: BedDataAggregator, cache_path: Path) -> None:

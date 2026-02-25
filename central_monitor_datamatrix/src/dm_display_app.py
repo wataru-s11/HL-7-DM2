@@ -159,7 +159,7 @@ class DMDisplayApp:
         self.image_label.pack(fill=tk.BOTH, expand=True)
         self.photo = None
         self.cache_path: Path | None = None
-        self.last_cache_mtime_ns: int | None = None
+        self.last_seen_packet_epoch: tuple[int, int] | None = None
 
     def set_cache_path(self, cache_path: Path) -> None:
         self.cache_path = cache_path
@@ -167,30 +167,25 @@ class DMDisplayApp:
     def _refresh_png_if_cache_updated(self) -> None:
         if self.cache_path is None:
             return
-        try:
-            current_mtime_ns = self.cache_path.stat().st_mtime_ns
-        except FileNotFoundError:
-            logger.warning("cache file not found: %s", self.cache_path)
-            return
-        except Exception as exc:
-            logger.error("failed to inspect cache file %s: %s", self.cache_path, exc)
-            return
-
-        if self.last_cache_mtime_ns == current_mtime_ns:
-            return
 
         try:
             cache, read_attempt = dm_datamatrix.load_cache_with_retry(self.cache_path)
             cache = _validate_cache_metadata(cache)
+            current_packet_epoch = (int(cache["packet_id"]), int(cache["epoch_ms"]))
+            if self.last_seen_packet_epoch == current_packet_epoch:
+                return
+
             sizes = dm_datamatrix.generate_datamatrix_png_from_cache_data(cache, self.out_path)
             snapshot_path = _resolve_snapshot_path(self.out_path, int(cache["epoch_ms"]))
             appended = _append_cache_snapshot(snapshot_path, cache)
-            self.last_cache_mtime_ns = current_mtime_ns
+            self.last_seen_packet_epoch = current_packet_epoch
 
             logger.info(
-                "regenerated datamatrix png from cache: %s (packet=%d, blob=%d, read_attempt=%d, snapshot_appended=%s)",
+                "regenerated datamatrix png from cache: %s (packet=%d, cache_packet_id=%d, epoch_ms=%d, blob=%d, read_attempt=%d, snapshot_appended=%s)",
                 self.out_path,
                 sizes["packet_size"],
+                current_packet_epoch[0],
+                current_packet_epoch[1],
                 sizes["blob_size"],
                 read_attempt,
                 appended,
