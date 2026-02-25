@@ -7,7 +7,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import mss
 import numpy as np
+from PIL import Image
 from PIL import ImageGrab
 
 import dm_datamatrix
@@ -26,6 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top", type=int, required=True, help="ROI top")
     parser.add_argument("--width", type=int, required=True, help="ROI width")
     parser.add_argument("--height", type=int, required=True, help="ROI height")
+    parser.add_argument("--monitor-index", type=int, default=None, help="Monitor index for monitor-local ROI coordinates")
     parser.add_argument("--out-jsonl", default="dataset/decoded_results.jsonl", help="Output JSONL path")
     parser.add_argument("--captures-dir", default="dataset/captures", help="Captured PNG directory")
     return parser.parse_args()
@@ -42,6 +45,13 @@ def capture_image(left: int, top: int, width: int, height: int):
     return ImageGrab.grab(bbox=bbox)
 
 
+def capture_image_by_mss(left: int, top: int, width: int, height: int) -> Image.Image:
+    monitor = {"left": left, "top": top, "width": width, "height": height}
+    with mss.mss() as sct:
+        screenshot = sct.grab(monitor)
+    return Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     args = parse_args()
@@ -50,7 +60,31 @@ def main() -> int:
     captures_dir.mkdir(parents=True, exist_ok=True)
     out_jsonl = Path(args.out_jsonl)
 
-    logger.info("start capture loop interval=%.2fs roi=(%d,%d,%d,%d)", args.interval_sec, args.left, args.top, args.width, args.height)
+    roi_left = args.left
+    roi_top = args.top
+
+    if args.monitor_index is not None:
+        with mss.mss() as sct:
+            monitors = sct.monitors
+
+        if args.monitor_index < 0 or args.monitor_index >= len(monitors):
+            raise ValueError(f"invalid --monitor-index={args.monitor_index}; valid range is 0..{len(monitors) - 1}")
+
+        mon = monitors[args.monitor_index]
+        roi_left = mon["left"] + args.left
+        roi_top = mon["top"] + args.top
+
+        logger.info(
+            "monitor_index=%d mon_left=%d mon_top=%d mon_width=%d mon_height=%d",
+            args.monitor_index,
+            mon["left"],
+            mon["top"],
+            mon["width"],
+            mon["height"],
+        )
+
+    logger.info("roi_global=(%d, %d, %d, %d)", roi_left, roi_top, args.width, args.height)
+    logger.info("start capture loop interval=%.2fs roi=(%d,%d,%d,%d)", args.interval_sec, roi_left, roi_top, args.width, args.height)
 
     try:
         while True:
@@ -68,7 +102,10 @@ def main() -> int:
             }
 
             try:
-                capture = capture_image(args.left, args.top, args.width, args.height)
+                if args.monitor_index is None:
+                    capture = capture_image(roi_left, roi_top, args.width, args.height)
+                else:
+                    capture = capture_image_by_mss(roi_left, roi_top, args.width, args.height)
                 capture.save(image_path)
 
                 image_rgb = np.array(capture)
