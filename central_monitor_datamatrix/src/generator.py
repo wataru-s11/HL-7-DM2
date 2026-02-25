@@ -122,11 +122,11 @@ def save_packet_id(state_path: Path, value: int) -> None:
     _write_text_atomic_with_retry(state_path, str(int(value)))
 
 
-def _write_text_atomic_with_retry(path: Path, text: str, retries: int = 5, base_delay_sec: float = 0.02) -> None:
+def _write_text_atomic_with_retry(path: Path, text: str, retries: int = 20, base_delay_sec: float = 0.05) -> None:
     last_error: PermissionError | None = None
     for attempt in range(1, retries + 1):
         token = secrets.token_hex(4)
-        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{token}.tmp")
+        tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}.{attempt}.{token}")
         try:
             with tmp_path.open("w", encoding="utf-8") as f:
                 f.write(text)
@@ -145,7 +145,7 @@ def _write_text_atomic_with_retry(path: Path, text: str, retries: int = 5, base_
             )
             tmp_path.unlink(missing_ok=True)
             if attempt < retries:
-                time.sleep(base_delay_sec * attempt)
+                time.sleep(base_delay_sec)
         except Exception:
             tmp_path.unlink(missing_ok=True)
             raise
@@ -159,6 +159,11 @@ def write_cache_snapshot(cache_path: Path, payload: dict[str, Any]) -> None:
     _write_text_atomic_with_retry(cache_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def default_truth_path(base_dir: Path, epoch_ms: int) -> Path:
+    day = datetime.fromtimestamp(epoch_ms / 1000.0, tz=timezone.utc).strftime("%Y%m%d")
+    return base_dir / day / "generator_results.jsonl"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
@@ -166,6 +171,11 @@ def main() -> None:
     ap.add_argument("--interval", type=float, default=1.0)
     ap.add_argument("--count", type=int, default=-1, help="送信ループ回数(-1で無限)")
     ap.add_argument("--truth-out", help="truth JSONLの出力先")
+    ap.add_argument(
+        "--truth-out-default-dataset",
+        action="store_true",
+        help="--truth-out未指定時に dataset/YYYYMMDD/generator_results.jsonl へ追記する",
+    )
     ap.add_argument("--append-truth", action="store_true", help="truth JSONLに追記する")
     ap.add_argument("--truth-every-n", type=int, default=1, help="何回に1回truthを書き込むか")
     ap.add_argument(
@@ -233,7 +243,11 @@ def main() -> None:
         write_cache_snapshot(cache_path, cache_record)
         save_packet_id(packet_state_path, packet_id)
 
-        if args.truth_out and ((loop + 1) % args.truth_every_n == 0):
+        truth_out_path = args.truth_out
+        if not truth_out_path and args.truth_out_default_dataset:
+            truth_out_path = str(default_truth_path(Path("dataset"), cycle_epoch_ms))
+
+        if truth_out_path and ((loop + 1) % args.truth_every_n == 0):
             truth_record: dict[str, Any] = {
                 "ts": cycle_iso,
                 "epoch_ms": cycle_epoch_ms,
@@ -244,7 +258,7 @@ def main() -> None:
             if args.truth_include_hl7:
                 truth_record["hl7"] = "\n".join(hl7_messages)
 
-            write_truth_record(args.truth_out, truth_record, append=truth_append_mode)
+            write_truth_record(truth_out_path, truth_record, append=truth_append_mode)
             truth_append_mode = True
 
         loop += 1

@@ -280,15 +280,11 @@ def pick_truth(
     tolerance_sec: float,
     decoded_time_source: str,
 ) -> tuple[dict[str, Any] | None, float | None, str]:
-    if decoded_packet_id is not None:
-        for row in truth_rows:
-            if normalize_packet_id(row.get("packet_id")) == decoded_packet_id:
-                delta = None
-                if decoded_timestamp_ms is not None:
-                    delta = float(row["epoch_ms"] - decoded_timestamp_ms)
-                return row, delta, "packet_id"
-
     if decoded_timestamp_ms is None or not truth_rows:
+        if decoded_packet_id is not None:
+            for row in truth_rows:
+                if normalize_packet_id(row.get("packet_id")) == decoded_packet_id:
+                    return row, None, "packet_id_fallback"
         return None, None, "none"
 
     truth_ts = [float(r["epoch_ms"]) for r in truth_rows]
@@ -395,6 +391,7 @@ def main() -> None:
     decode_success_record_count = crc_fail_record_count = truth_missing_record_count = 0
     delta_t_values: list[float] = []
     matched_by_counter: Counter[str] = Counter()
+    decoded_time_source_counter: Counter[str] = Counter()
     evaluated_on_success = matched_on_success = 0
     abs_errors_on_success: list[float] = []
     per_field: dict[str, dict[str, Any]] = {f: {"count": 0, "evaluated": 0, "matched": 0, "within_tol_matched": 0, "abs_errors": []} for f in VITAL_ORDER}
@@ -428,6 +425,7 @@ def main() -> None:
                 if dts:
                     decoded_timestamp_ms = int(round(dts.timestamp() * 1000))
                     decoded_time_source = "record_timestamp"
+            decoded_time_source_counter[decoded_time_source] += 1
 
             nearest_truth, delta_t, matched_by = pick_truth(
                 decoded_packet_id,
@@ -587,6 +585,10 @@ def main() -> None:
 
     print(f"[INFO] Detailed results written: {out_path}")
     print(f"[INFO] Summary written: {summary_path}")
+    print(
+        "[INFO] Timestamp key usage: decoded timestamp source="
+        f"{dict(decoded_time_source_counter)}, truth match key={dict(matched_by_counter)}"
+    )
 
 
 if __name__ == "__main__":

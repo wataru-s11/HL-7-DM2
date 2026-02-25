@@ -3,10 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
-import secrets
-import threading
-import time
 import tkinter as tk
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,107 +19,36 @@ WINDOW_WIDTH = 420
 WINDOW_HEIGHT = 420
 
 
-def _now_epoch_ms() -> int:
-    return int(datetime.now(timezone.utc).timestamp() * 1000)
-
-
-def _load_packet_id(state_path: Path) -> int:
-    if not state_path.exists():
-        return 0
-    try:
-        return int(state_path.read_text(encoding="utf-8").strip() or "0")
-    except Exception:
-        logger.warning("failed to read packet id state: %s", state_path)
-        return 0
-
-
-def _save_packet_id(state_path: Path, packet_id: int) -> None:
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_text_atomic_with_retry(state_path, str(packet_id))
-
-
-def _write_cache(cache_path: Path, cache: dict[str, Any]) -> None:
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_text_atomic_with_retry(cache_path, json.dumps(cache, ensure_ascii=False, indent=2))
-
-
-def _write_text_atomic_with_retry(path: Path, text: str, retries: int = 5, base_delay_sec: float = 0.02) -> None:
-    last_error: PermissionError | None = None
-    for attempt in range(1, retries + 1):
-        token = secrets.token_hex(4)
-        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{token}.tmp")
-        try:
-            with tmp_path.open("w", encoding="utf-8") as f:
-                f.write(text)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, path)
-            return
-        except PermissionError as exc:
-            last_error = exc
-            logger.warning(
-                "atomic replace retry due to PermissionError: target=%s attempt=%d/%d error=%s",
-                path,
-                attempt,
-                retries,
-                exc,
-            )
-            tmp_path.unlink(missing_ok=True)
-            if attempt < retries:
-                time.sleep(base_delay_sec * attempt)
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            raise
-    assert last_error is not None
-    logger.error("atomic replace failed after retries: target=%s", path)
-    raise last_error
-
-
-def _ensure_cache_metadata(cache: dict[str, Any], cache_path: Path) -> tuple[dict[str, Any], bool]:
-    changed = False
-
+def _validate_cache_metadata(cache: dict[str, Any]) -> dict[str, Any]:
     epoch_ms = cache.get("epoch_ms")
-    if not isinstance(epoch_ms, int):
-        try:
-            epoch_ms = int(float(epoch_ms))
-        except (TypeError, ValueError):
-            epoch_ms = _now_epoch_ms()
-        cache["epoch_ms"] = epoch_ms
-        changed = True
-
-    ts = cache.get("ts")
-    if not isinstance(ts, str) or not ts.strip():
-        cache["ts"] = datetime.fromtimestamp(epoch_ms / 1000.0, tz=timezone.utc).isoformat(timespec="milliseconds")
-        changed = True
-
     packet_id = cache.get("packet_id")
-    if isinstance(packet_id, bool):
-        packet_id = None
-    try:
-        packet_id_int = int(packet_id)
-    except (TypeError, ValueError):
-        packet_id_int = None
+    ts = cache.get("ts")
 
-    if packet_id_int is None:
-        state_path = cache_path.with_suffix(".packet_id")
-        packet_id_int = _load_packet_id(state_path) + 1
-        cache["packet_id"] = packet_id_int
-        _save_packet_id(state_path, packet_id_int)
-        changed = True
-    else:
-        cache["packet_id"] = packet_id_int
+    if isinstance(epoch_ms, bool):
+        raise ValueError("cache field epoch_ms must be int, got bool")
+    if not isinstance(epoch_ms, int):
+        raise ValueError(f"cache field epoch_ms is required as int (got={type(epoch_ms).__name__})")
+
+    if isinstance(packet_id, bool):
+        raise ValueError("cache field packet_id must be int, got bool")
+    if not isinstance(packet_id, int):
+        raise ValueError(f"cache field packet_id is required as int (got={type(packet_id).__name__})")
+
+    if not isinstance(ts, str) or not ts.strip():
+        cache = dict(cache)
+        cache["ts"] = datetime.fromtimestamp(epoch_ms / 1000.0, tz=timezone.utc).isoformat(timespec="milliseconds")
 
     source = cache.get("source")
     if not isinstance(source, str) or not source.strip():
-        cache["source"] = "generator"
-        changed = True
+        cache = dict(cache)
+        cache["source"] = "unknown"
 
     beds = cache.get("beds")
     if not isinstance(beds, dict):
+        cache = dict(cache)
         cache["beds"] = {}
-        changed = True
 
-    return cache, changed
+    return cache
 
 
 def _resolve_snapshot_path(out_path: Path, epoch_ms: int) -> Path:
@@ -257,10 +182,7 @@ class DMDisplayApp:
         self.last_cache_mtime_ns = current_mtime_ns
         try:
             cache, read_attempt = dm_datamatrix.load_cache_with_retry(self.cache_path)
-            cache, changed = _ensure_cache_metadata(cache, self.cache_path)
-            if changed:
-                _write_cache(self.cache_path, cache)
-
+            cache = _validate_cache_metadata(cache)
             sizes = dm_datamatrix.generate_datamatrix_png_from_cache_data(cache, self.out_path)
             snapshot_path = _resolve_snapshot_path(self.out_path, int(cache["epoch_ms"]))
             appended = _append_cache_snapshot(snapshot_path, cache)
@@ -280,7 +202,11 @@ class DMDisplayApp:
                     cache.get("packet_id"),
                 )
         except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("cache read retry exhausted; skip refresh and keep previous png: %s", exc)
+            logger.warning(
+                "cache read retry exhausted after dm_datamatrix.load_cache_with_retry(retries=3): cache=%s error=%s",
+                self.cache_path,
+                exc,
+            )
         except Exception as exc:
             logger.warning("failed to regenerate datamatrix png; keeping previous png: %s", exc)
 

@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class BedDataAggregator:
     beds: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    packet_id: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock)
 
     def update_from_parsed(self, parsed: Dict[str, Any]) -> None:
         bed = parsed.get("bed", "UNKNOWN")
@@ -33,8 +35,13 @@ class BedDataAggregator:
         }
 
     def snapshot(self) -> Dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        self.packet_id += 1
         return {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "epoch_ms": int(now.timestamp() * 1000),
+            "ts": now.isoformat(timespec="milliseconds"),
+            "packet_id": self.packet_id,
+            "source": "hl7_receiver",
             "beds": self.beds,
         }
 
@@ -54,11 +61,11 @@ def _write_cache_atomic(cache_path: Path, payload: Dict[str, Any], *, indent: in
     )
 
 
-def _write_text_atomic_with_retry(path: Path, text: str, retries: int = 5, base_delay_sec: float = 0.02) -> None:
+def _write_text_atomic_with_retry(path: Path, text: str, retries: int = 20, base_delay_sec: float = 0.05) -> None:
     last_error: PermissionError | None = None
     for attempt in range(1, retries + 1):
         token = secrets.token_hex(4)
-        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{token}.tmp")
+        tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}.{attempt}.{token}")
         try:
             with tmp_path.open("w", encoding="utf-8") as f:
                 f.write(text)
@@ -77,7 +84,7 @@ def _write_text_atomic_with_retry(path: Path, text: str, retries: int = 5, base_
             )
             tmp_path.unlink(missing_ok=True)
             if attempt < retries:
-                time.sleep(base_delay_sec * attempt)
+                time.sleep(base_delay_sec)
         except Exception:
             tmp_path.unlink(missing_ok=True)
             raise
@@ -93,8 +100,9 @@ def _handle_client(conn: socket.socket, aggregator: BedDataAggregator, cache_pat
         if not message:
             return
         parsed = parse_hl7_message(message)
-        aggregator.update_from_parsed(parsed)
-        _write_cache_atomic(cache_path, aggregator.snapshot(), indent=2)
+        with aggregator.lock:
+            aggregator.update_from_parsed(parsed)
+            _write_cache_atomic(cache_path, aggregator.snapshot(), indent=2)
         conn.sendall(SB + b"MSA|AA|OK" + EB_CR)
     finally:
         conn.close()
@@ -103,7 +111,8 @@ def _handle_client(conn: socket.socket, aggregator: BedDataAggregator, cache_pat
 def serve(host: str, port: int, cache_path: Path) -> None:
     aggregator = BedDataAggregator()
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_cache_atomic(cache_path, aggregator.snapshot())
+    with aggregator.lock:
+        _write_cache_atomic(cache_path, aggregator.snapshot())
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
