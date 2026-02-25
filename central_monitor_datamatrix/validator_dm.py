@@ -88,7 +88,7 @@ NUM_RE = re.compile(r"[-+]?\d*\.?\d+")
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate DataMatrix decode results against truth data")
     parser.add_argument("--decoded-results", required=True, help="Decoded results JSONL path")
-    parser.add_argument("--truth-mode", required=True, choices=["cache", "generator"])
+    parser.add_argument("--truth-mode", required=True, choices=["cache", "generator", "generator_jsonl"])
     parser.add_argument("--monitor-cache-dir", help="Directory containing monitor cache snapshots")
     parser.add_argument("--generator-results", help="Generator truth JSONL path")
     parser.add_argument("--out", required=True, help="Detailed result JSONL path")
@@ -176,6 +176,17 @@ def extract_truth_value(record: dict[str, Any], mode: str, bed: str, field: str)
             return None
         return bed_data.get(field)
 
+    if mode == "generator_jsonl":
+        if not isinstance(bed_data, dict):
+            return None
+        vitals = bed_data.get("vitals", {})
+        if not isinstance(vitals, dict):
+            return None
+        field_obj = vitals.get(field, {})
+        if not isinstance(field_obj, dict):
+            return None
+        return field_obj.get("value")
+
     # mode == cache
     if not isinstance(bed_data, dict):
         return None
@@ -214,6 +225,28 @@ def tail_jsonl(path: Path, last_n: int | None) -> list[dict[str, Any]]:
     return list(q)
 
 
+def normalize_epoch_ms(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        f = float(value)
+        if math.isnan(f) or math.isinf(f):
+            return None
+        return int(round(f))
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            f = float(text)
+        except ValueError:
+            return None
+        if math.isnan(f) or math.isinf(f):
+            return None
+        return int(round(f))
+    return None
+
+
 def load_truth_generator(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for row in iter_jsonl(path):
@@ -223,6 +256,24 @@ def load_truth_generator(path: Path) -> list[dict[str, Any]]:
             continue
         rows.append({"timestamp": ts, "timestamp_text": row.get("timestamp"), "beds": row.get("beds", {})})
     rows.sort(key=lambda x: x["timestamp"])
+    return rows
+
+
+def load_truth_generator_jsonl(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row in iter_jsonl(path):
+        epoch_ms = normalize_epoch_ms(row.get("epoch_ms"))
+        if epoch_ms is None:
+            print("[WARN] truth(generator_jsonl) row missing valid epoch_ms, skipped")
+            continue
+        rows.append(
+            {
+                "epoch_ms": epoch_ms,
+                "timestamp_text": row.get("ts"),
+                "beds": row.get("beds", {}),
+            }
+        )
+    rows.sort(key=lambda x: x["epoch_ms"])
     return rows
 
 
@@ -247,23 +298,20 @@ def load_truth_cache(cache_dir: Path) -> list[dict[str, Any]]:
         rows.append(
             {
                 "timestamp": ts,
+                "epoch_ms": int(round(ts.timestamp() * 1000)),
                 "timestamp_text": payload.get("timestamp") if isinstance(payload, dict) else None,
                 "beds": payload.get("beds", {}) if isinstance(payload, dict) else {},
             }
         )
-    rows.sort(key=lambda x: x["timestamp"])
+    rows.sort(key=lambda x: x["epoch_ms"])
     return rows
 
 
-def to_epoch_seconds(dt: datetime) -> float:
-    return dt.timestamp()
-
-
-def pick_nearest_truth(decoded_ts: datetime, truth_rows: list[dict[str, Any]], tolerance_sec: float) -> tuple[dict[str, Any] | None, float | None]:
+def pick_nearest_truth(decoded_at_ms: int, truth_rows: list[dict[str, Any]], tolerance_sec: float) -> tuple[dict[str, Any] | None, float | None]:
     if not truth_rows:
         return None, None
-    truth_ts = [to_epoch_seconds(r["timestamp"]) for r in truth_rows]
-    target = to_epoch_seconds(decoded_ts)
+    truth_ts = [float(r["epoch_ms"]) for r in truth_rows]
+    target = float(decoded_at_ms)
     idx = bisect_left(truth_ts, target)
     candidates: list[tuple[float, int]] = []
     if idx < len(truth_rows):
@@ -275,9 +323,23 @@ def pick_nearest_truth(decoded_ts: datetime, truth_rows: list[dict[str, Any]], t
 
     _, best_i = min(candidates, key=lambda x: x[0])
     delta = truth_ts[best_i] - target
-    if abs(delta) > tolerance_sec:
+    if abs(delta) > tolerance_sec * 1000.0:
         return None, None
     return truth_rows[best_i], delta
+
+
+def extract_decoded_value(bed_data: dict[str, Any], field: str) -> Any:
+    if not isinstance(bed_data, dict):
+        return None
+    if field in bed_data:
+        return bed_data.get(field)
+    vitals = bed_data.get("vitals", {})
+    if not isinstance(vitals, dict):
+        return None
+    field_obj = vitals.get(field, {})
+    if not isinstance(field_obj, dict):
+        return None
+    return field_obj.get("value")
 
 
 def percentile(values: list[float], p: float) -> float | None:
@@ -322,8 +384,8 @@ def main() -> None:
 
     if args.truth_mode == "cache" and not args.monitor_cache_dir:
         raise ValueError("--monitor-cache-dir is required when --truth-mode=cache")
-    if args.truth_mode == "generator" and not args.generator_results:
-        raise ValueError("--generator-results is required when --truth-mode=generator")
+    if args.truth_mode in {"generator", "generator_jsonl"} and not args.generator_results:
+        raise ValueError("--generator-results is required when --truth-mode=generator or generator_jsonl")
 
     config = load_or_create_config(config_path)
     eps_map = config.get("field_epsilons", {})
@@ -332,8 +394,16 @@ def main() -> None:
 
     if args.truth_mode == "cache":
         truth_rows = load_truth_cache(Path(args.monitor_cache_dir))
+    elif args.truth_mode == "generator_jsonl":
+        truth_rows = load_truth_generator_jsonl(Path(args.generator_results))
     else:
         truth_rows = load_truth_generator(Path(args.generator_results))
+
+    if args.truth_mode == "generator":
+        for row in truth_rows:
+            ts = row.get("timestamp")
+            if isinstance(ts, datetime):
+                row["epoch_ms"] = int(round(ts.timestamp() * 1000))
 
     print(f"[INFO] Loaded truth rows: {len(truth_rows)}")
     decoded_rows = tail_jsonl(decoded_path, args.last)
@@ -351,8 +421,13 @@ def main() -> None:
     abs_errors: list[float] = []
 
     decoded_record_count = len(decoded_rows)
+    decode_success_record_count = 0
+    crc_fail_record_count = 0
     truth_missing_record_count = 0
     delta_t_values: list[float] = []
+    evaluated_on_success = 0
+    matched_on_success = 0
+    abs_errors_on_success: list[float] = []
 
     per_field: dict[str, dict[str, Any]] = {
         field: {"count": 0, "evaluated": 0, "matched": 0, "within_tol_matched": 0, "abs_errors": []}
@@ -361,21 +436,41 @@ def main() -> None:
 
     with out_path.open("w", encoding="utf-8") as out_f:
         for rec_idx, rec in enumerate(decoded_rows, 1):
+            decode_ok = bool(rec.get("decode_ok"))
+            crc_ok = bool(rec.get("crc_ok"))
+            is_success_record = decode_ok and crc_ok
+            if is_success_record:
+                decode_success_record_count += 1
+            if not crc_ok:
+                crc_fail_record_count += 1
+
             dec_ts_raw = rec.get("timestamp")
-            dec_ts = parse_timestamp(dec_ts_raw)
-            if dec_ts is None:
-                dec_ts = infer_timestamp_from_filename(rec.get("image_path"))
+            decoded_at_ms = normalize_epoch_ms(rec.get("decoded_at_ms"))
+            if decoded_at_ms is None:
+                decoded_at_ms = normalize_epoch_ms(rec.get("timestamp_ms"))
+            if decoded_at_ms is None:
+                dec_ts = parse_timestamp(dec_ts_raw)
+                if dec_ts is None:
+                    dec_ts = infer_timestamp_from_filename(rec.get("image_path") or rec.get("source_image"))
+                if dec_ts is not None:
+                    decoded_at_ms = int(round(dec_ts.timestamp() * 1000))
 
             nearest_truth = None
             delta_t = None
-            if dec_ts is not None:
-                nearest_truth, delta_t = pick_nearest_truth(dec_ts, truth_rows, args.tolerance_sec)
+            if decoded_at_ms is not None:
+                nearest_truth, delta_t = pick_nearest_truth(decoded_at_ms, truth_rows, args.tolerance_sec)
             if nearest_truth is None:
                 truth_missing_record_count += 1
             else:
                 delta_t_values.append(delta_t if delta_t is not None else 0.0)
 
             decoded_beds = rec.get("decoded", {}).get("beds", {}) if isinstance(rec.get("decoded"), dict) else {}
+            if not isinstance(decoded_beds, dict):
+                decoded_beds = {}
+            if not decoded_beds:
+                beds_direct = rec.get("beds")
+                if isinstance(beds_direct, dict):
+                    decoded_beds = beds_direct
             if not isinstance(decoded_beds, dict):
                 decoded_beds = {}
 
@@ -385,7 +480,7 @@ def main() -> None:
                     total_expected += 1
                     per_field[field]["count"] += 1
 
-                    dec_value_raw = bed_decoded.get(field)
+                    dec_value_raw = extract_decoded_value(bed_decoded, field)
                     dec_value, dec_status = normalize_number(dec_value_raw)
 
                     truth_value = None
@@ -441,10 +536,15 @@ def main() -> None:
                         within_tol_match = abs(dec_value - truth_value) <= eps
                         abs_error = abs(dec_value - truth_value)
                         abs_errors.append(abs_error)
+                        if is_success_record:
+                            evaluated_on_success += 1
+                            abs_errors_on_success.append(abs_error)
                         per_field[field]["abs_errors"].append(abs_error)
 
                         if match:
                             matched_count += 1
+                            if is_success_record:
+                                matched_on_success += 1
                             per_field[field]["matched"] += 1
                         if within_tol_match:
                             within_tol_matched_count += 1
@@ -453,9 +553,12 @@ def main() -> None:
                     row = {
                         "timestamp": dec_ts_raw,
                         "truth_timestamp": nearest_truth.get("timestamp_text") if nearest_truth else None,
-                        "delta_t_seconds": delta_t,
+                        "delta_t_ms": delta_t,
                         "bed": bed,
                         "field": field,
+                        "decoded_at_ms": decoded_at_ms,
+                        "decode_ok": decode_ok,
+                        "crc_ok": crc_ok,
                         "decoded_value": dec_value,
                         "truth_value": truth_value,
                         "abs_error": abs_error,
@@ -482,13 +585,19 @@ def main() -> None:
     summary = {
         "decoded_records": decoded_record_count,
         "truth_rows": len(truth_rows),
+        "decode_success_records": decode_success_record_count,
+        "decode_success_rate": (decode_success_record_count / decoded_record_count) if decoded_record_count else None,
+        "crc_fail_records": crc_fail_record_count,
+        "crc_fail_rate": (crc_fail_record_count / decoded_record_count) if decoded_record_count else None,
         "total_expected": total_expected,
         "evaluated": evaluated_count,
         "matched": matched_count,
         "within_tol_matched": within_tol_matched_count,
         "match_rate": (matched_count / evaluated_count) if evaluated_count else None,
+        "match_rate_on_success": (matched_on_success / evaluated_on_success) if evaluated_on_success else None,
         "within_tol_match_rate": (within_tol_matched_count / evaluated_count) if evaluated_count else None,
         "mae": safe_mean(abs_errors),
+        "mae_on_success": safe_mean(abs_errors_on_success),
         "median_abs_error": safe_median(abs_errors),
         "missing": missing_count,
         "invalid": invalid_count,
@@ -496,7 +605,7 @@ def main() -> None:
         "invalid_rate": (invalid_count / total_expected) if total_expected else None,
         "truth_missing_records": truth_missing_record_count,
         "truth_missing_rate": (truth_missing_record_count / decoded_record_count) if decoded_record_count else None,
-        "delta_t_seconds": {
+        "delta_t_ms": {
             "mean": safe_mean(delta_t_values),
             "median": safe_median(delta_t_values),
             "p90": percentile(delta_t_values, 90.0),
