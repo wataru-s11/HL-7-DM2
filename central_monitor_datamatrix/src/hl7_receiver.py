@@ -6,6 +6,7 @@ import logging
 import os
 import socket
 import threading
+import time
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +19,8 @@ SB = b"\x0b"
 EB_CR = b"\x1c\x0d"
 logger = logging.getLogger(__name__)
 WRITER_LOCK_TIMEOUT_SEC = 2.0
+CACHE_WRITE_RETRIES = 20
+CACHE_WRITE_RETRY_DELAY_SEC = 0.05
 
 
 @dataclass
@@ -55,7 +58,23 @@ def _extract_mllp_payload(data: bytes) -> str:
 
 
 def _write_cache_atomic(cache_path: Path, payload: Dict[str, Any]) -> None:
-    cache_io.atomic_write_json(cache_path, payload)
+    last_exc: Exception | None = None
+    for attempt in range(1, CACHE_WRITE_RETRIES + 1):
+        try:
+            cache_io.atomic_write_json(cache_path, payload)
+            return
+        except PermissionError as exc:
+            last_exc = exc
+            if attempt >= CACHE_WRITE_RETRIES:
+                break
+            time.sleep(CACHE_WRITE_RETRY_DELAY_SEC)
+        except TimeoutError as exc:
+            last_exc = exc
+            if attempt >= CACHE_WRITE_RETRIES:
+                break
+            time.sleep(CACHE_WRITE_RETRY_DELAY_SEC)
+
+    raise RuntimeError(f"failed to update cache after retries: {cache_path}") from last_exc
 
 
 def claim_single_writer(cache_path: Path, writer_name: str) -> tuple[Path, int]:
@@ -66,7 +85,9 @@ def claim_single_writer(cache_path: Path, writer_name: str) -> tuple[Path, int]:
     return writer_lock_path, fd
 
 
-def _release_claim(lock_path: Path, fd: int) -> None:
+def _release_claim(lock_path: Path | None, fd: int | None) -> None:
+    if lock_path is None or fd is None:
+        return
     try:
         os.close(fd)
     finally:
@@ -82,7 +103,10 @@ def _handle_client(conn: socket.socket, aggregator: BedDataAggregator, cache_pat
         parsed = parse_hl7_message(message)
         with aggregator.lock:
             aggregator.update_from_parsed(parsed)
-            _write_cache_atomic(cache_path, aggregator.snapshot())
+            try:
+                _write_cache_atomic(cache_path, aggregator.snapshot())
+            except Exception as exc:
+                logger.warning("cache update failed (skip this tick): %s", exc)
         conn.sendall(SB + b"MSA|AA|OK" + EB_CR)
     finally:
         conn.close()
@@ -118,7 +142,12 @@ def main() -> None:
     ap.add_argument("--cache", default="receiver_cache.json", help="receiver用cache出力先 (generatorとは分離推奨)")
     args = ap.parse_args()
     cache_path = Path(args.cache)
-    claim_lock_path, claim_fd = claim_single_writer(cache_path, "hl7_receiver")
+    claim_lock_path: Path | None = None
+    claim_fd: int | None = None
+    try:
+        claim_lock_path, claim_fd = claim_single_writer(cache_path, "hl7_receiver")
+    except TimeoutError as exc:
+        logger.warning("writer claim timed out; continuing without exclusive claim: %s", exc)
     atexit.register(_release_claim, claim_lock_path, claim_fd)
     serve(args.host, args.port, cache_path)
 

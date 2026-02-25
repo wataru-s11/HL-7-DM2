@@ -20,7 +20,7 @@ WINDOW_WIDTH = 420
 WINDOW_HEIGHT = 420
 
 
-def _normalize_cache_metadata(cache: dict[str, Any], fallback_epoch_ms: int, fallback_packet_id: int) -> dict[str, Any]:
+def _ensure_cache_metadata(cache: dict[str, Any], fallback_epoch_ms: int, fallback_packet_id: int) -> dict[str, Any]:
     cache = dict(cache)
 
     epoch_ms = cache.get("epoch_ms")
@@ -102,10 +102,11 @@ class DMDisplayApp:
         self.image_label.pack(fill=tk.BOTH, expand=True)
         self.photo = None
         self.cache_path: Path | None = None
-        self.last_seen_packet_epoch: tuple[int, int] | None = None
-        self.last_cache_mtime_ns: int | None = None
+        self.last_seen_epoch_ms: int | None = None
+        self.last_seen_packet_id: int | None = None
         self.no_update_count = 0
         self.read_failures = 0
+        self.tick_count = 0
 
     def set_cache_path(self, cache_path: Path) -> None:
         self.cache_path = cache_path
@@ -115,40 +116,56 @@ class DMDisplayApp:
             return
 
         try:
-            stat = self.cache_path.stat()
-            current_mtime_ns = stat.st_mtime_ns
-            if self.last_cache_mtime_ns is not None and current_mtime_ns == self.last_cache_mtime_ns:
-                self.no_update_count += 1
-                if self.debug and self.no_update_count % 20 == 0:
-                    logger.info("debug: cache mtime unchanged count=%d mtime_ns=%d path=%s", self.no_update_count, current_mtime_ns, self.cache_path)
-                return
-
+            self.tick_count += 1
             cache, read_attempt = dm_datamatrix.load_cache_with_retry(self.cache_path)
-            self.last_cache_mtime_ns = current_mtime_ns
-            self.no_update_count = 0
             self.read_failures = 0
 
             fallback_epoch_ms = int(time.time() * 1000)
-            fallback_packet_id = self.last_seen_packet_epoch[0] + 1 if self.last_seen_packet_epoch else 1
-            cache = _normalize_cache_metadata(cache, fallback_epoch_ms=fallback_epoch_ms, fallback_packet_id=fallback_packet_id)
-            current_packet_epoch = (int(cache["packet_id"]), int(cache["epoch_ms"]))
-            if self.last_seen_packet_epoch == current_packet_epoch:
+            fallback_packet_id = (self.last_seen_packet_id + 1) if self.last_seen_packet_id is not None else 1
+            cache = _ensure_cache_metadata(cache, fallback_epoch_ms=fallback_epoch_ms, fallback_packet_id=fallback_packet_id)
+
+            current_epoch_ms = int(cache["epoch_ms"])
+            current_packet_id = int(cache["packet_id"])
+            if self.last_seen_epoch_ms == current_epoch_ms and self.last_seen_packet_id == current_packet_id:
+                self.no_update_count += 1
+                if self.tick_count % 10 == 0:
+                    logger.info(
+                        "heartbeat: tick=%d unchanged_count=%d last_epoch_ms=%s last_packet_id=%s read_attempt=%d",
+                        self.tick_count,
+                        self.no_update_count,
+                        self.last_seen_epoch_ms,
+                        self.last_seen_packet_id,
+                        read_attempt,
+                    )
                 if self.debug:
-                    logger.info("debug: cache metadata unchanged packet_epoch=%s", current_packet_epoch)
+                    logger.info(
+                        "debug: cache metadata unchanged epoch_ms=%d packet_id=%d",
+                        current_epoch_ms,
+                        current_packet_id,
+                    )
                 return
 
             sizes = dm_datamatrix.generate_datamatrix_png_from_cache_data(cache, self.out_path)
-            self.last_seen_packet_epoch = current_packet_epoch
+            self.last_seen_epoch_ms = current_epoch_ms
+            self.last_seen_packet_id = current_packet_id
+            self.no_update_count = 0
 
             logger.info(
                 "regenerated datamatrix png from cache(read-only): %s (packet=%d, cache_packet_id=%d, epoch_ms=%d, blob=%d, read_attempt=%d)",
                 self.out_path,
                 sizes["packet_size"],
-                current_packet_epoch[0],
-                current_packet_epoch[1],
+                current_packet_id,
+                current_epoch_ms,
                 sizes["blob_size"],
                 read_attempt,
             )
+            if self.tick_count % 10 == 0:
+                logger.info(
+                    "heartbeat: tick=%d updated epoch_ms=%d packet_id=%d",
+                    self.tick_count,
+                    current_epoch_ms,
+                    current_packet_id,
+                )
         except FileNotFoundError:
             if self.debug:
                 logger.info("debug: cache file not found yet: %s", self.cache_path)

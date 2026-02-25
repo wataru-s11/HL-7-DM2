@@ -42,6 +42,8 @@ GENERATOR_VITAL_SPECS = [
 
 JST = timezone(timedelta(hours=9))
 WRITER_LOCK_TIMEOUT_SEC = 2.0
+CACHE_WRITE_RETRIES = 20
+CACHE_WRITE_RETRY_DELAY_SEC = 0.05
 
 
 def _to_bool(value: str | bool) -> bool:
@@ -130,7 +132,25 @@ def save_packet_id(state_path: Path, value: int) -> None:
 
 
 def write_cache_snapshot(cache_path: Path, payload: dict[str, Any]) -> None:
-    cache_io.atomic_write_json(cache_path, payload)
+    last_exc: Exception | None = None
+    for attempt in range(1, CACHE_WRITE_RETRIES + 1):
+        try:
+            cache_io.atomic_write_json(cache_path, payload)
+            return
+        except PermissionError as exc:
+            last_exc = exc
+            if attempt >= CACHE_WRITE_RETRIES:
+                break
+            time.sleep(CACHE_WRITE_RETRY_DELAY_SEC)
+        except TimeoutError as exc:
+            last_exc = exc
+            if attempt >= CACHE_WRITE_RETRIES:
+                break
+            time.sleep(CACHE_WRITE_RETRY_DELAY_SEC)
+
+    raise RuntimeError(
+        f"failed to update cache after retries: {cache_path}"
+    ) from last_exc
 
 
 def claim_single_writer(cache_path: Path, writer_name: str) -> tuple[Path, int]:
@@ -141,7 +161,9 @@ def claim_single_writer(cache_path: Path, writer_name: str) -> tuple[Path, int]:
     return writer_lock_path, fd
 
 
-def _release_claim(lock_path: Path, fd: int) -> None:
+def _release_claim(lock_path: Path | None, fd: int | None) -> None:
+    if lock_path is None or fd is None:
+        return
     try:
         os.close(fd)
     finally:
@@ -198,7 +220,12 @@ def main() -> None:
     cache_path = Path(args.cache_out)
     packet_state_path = Path(args.packet_id_state) if args.packet_id_state else cache_path.with_suffix(".packet_id")
     packet_id = load_packet_id(packet_state_path)
-    claim_lock_path, claim_fd = claim_single_writer(cache_path, "generator")
+    claim_lock_path: Path | None = None
+    claim_fd: int | None = None
+    try:
+        claim_lock_path, claim_fd = claim_single_writer(cache_path, "generator")
+    except TimeoutError as exc:
+        logger.warning("writer claim timed out; continuing without exclusive claim: %s", exc)
     atexit.register(_release_claim, claim_lock_path, claim_fd)
 
     while args.count < 0 or loop < args.count:
@@ -237,8 +264,11 @@ def main() -> None:
             "source": "generator",
             "beds": cycle_beds,
         }
-        write_cache_snapshot(cache_path, cache_record)
-        save_packet_id(packet_state_path, packet_id)
+        try:
+            write_cache_snapshot(cache_path, cache_record)
+            save_packet_id(packet_state_path, packet_id)
+        except Exception as exc:
+            logger.warning("cache snapshot write failed (will continue next cycle): %s", exc)
 
         truth_out_path = args.truth_out
         if not truth_out_path and args.truth_out_default_dataset:

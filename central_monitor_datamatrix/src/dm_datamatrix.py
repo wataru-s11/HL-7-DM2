@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import time
@@ -30,13 +31,20 @@ def build_blob_from_cache(cache: dict[str, Any], beds_count: int = 6) -> tuple[b
     return blob, packet_bytes
 
 
-def generate_datamatrix_png(blob: bytes, out_path: Path, zint_exe: Path | None = None) -> subprocess.CompletedProcess[str]:
+def generate_datamatrix_png(
+    blob: bytes,
+    out_path: Path,
+    zint_exe: Path | None = None,
+    timeout_sec: float = 3.0,
+) -> subprocess.CompletedProcess[str]:
     zint_exe = zint_exe or resolve_zint_exe()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     with tempfile.NamedTemporaryFile("wb", delete=False, suffix=".bin") as tf:
         tf.write(blob)
         bin_file = Path(tf.name)
+
+    tmp_png = out_path.with_name(f"{out_path.name}.tmp.{os.getpid()}.{time.time_ns()}")
 
     try:
         cmd = [
@@ -52,11 +60,23 @@ def generate_datamatrix_png(blob: bytes, out_path: Path, zint_exe: Path | None =
             "--quietzones",
             "--scale=4",
             "-o",
-            str(out_path),
+            str(tmp_png),
         ]
-        return subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
+        if result.returncode == 0:
+            os.replace(tmp_png, out_path)
+        return result
+    except subprocess.TimeoutExpired as exc:
+        tmp_png.unlink(missing_ok=True)
+        raise RuntimeError(
+            "zint.exe timed out "
+            f"(timeout_sec={timeout_sec})\n"
+            f"stdout:\n{exc.stdout or ''}\n"
+            f"stderr:\n{exc.stderr or ''}"
+        ) from exc
     finally:
         bin_file.unlink(missing_ok=True)
+        tmp_png.unlink(missing_ok=True)
 
 
 def load_cache_with_retry(cache_path: Path, retries: int = 3, retry_delay_sec: float = 0.05) -> tuple[dict[str, Any], int]:
