@@ -70,7 +70,7 @@ python src/dm_capture_decode_app.py --interval-sec 10 --left 1400 --top 20 --wid
 ```
 
 - 保存画像: `dataset/captures/YYYYMMDD_HHMMSS.png`
-- JSONL: 1行1レコード（`timestamp_ms`, `decoded_at_ms`, `source_image`, `decode_ok`, `crc_ok`, `beds`）
+- JSONL: 1行1レコード（`timestamp_ms`, `packet_id`, `decoded_at_ms`, `source_image`, `decode_ok`, `crc_ok`, `beds`）
 - decode失敗時は `decode_ok:false` と `error` を記録（プロセスは継続）
 
 ## ROI決めのコツ
@@ -85,3 +85,18 @@ python src/dm_capture_decode_app.py --interval-sec 10 --left 1400 --top 20 --wid
 1) `dm_display_app.py` を起動してDataMatrix小窓が表示されることを確認
 2) `dm_capture_decode_app.py` を起動して10秒ごとに `dataset/captures/*.png` が増えることを確認
 3) `dataset/decoded_results.jsonl` が追記され、成功時は `decode_ok:true` / `crc_ok:true` になることを確認
+
+
+## 検証ワークフロー（packet_id優先の1:1突合）
+
+1. `generator.py` で `monitor_cache.json` を更新（`epoch_ms`/`packet_id` を付与）
+2. `dm_display_app.py` で DataMatrix を再生成し、同時に `dataset/YYYYMMDD/cache_snapshots.jsonl` を追記
+3. `dm_capture_decode_app.py` で decode 結果を `decoded_results.jsonl` へ追記
+4. `validator_dm.py` を `cache_snapshot_jsonl` モードで実行して評価
+
+```bash
+python validator_dm.py --decoded-results dataset/decoded_results.jsonl --truth-mode cache_snapshot_jsonl --cache-snapshots dataset/20260225/cache_snapshots.jsonl --out dataset/dm_validation_results.jsonl --summary-out dataset/dm_validation_summary.json --last 200 --tolerance-sec 2.0 --debug-one
+```
+
+- `validator_dm.py` は `packet_id` 完全一致を最優先し、無い場合のみ `timestamp_ms` と `epoch_ms` を `--tolerance-sec` で近傍一致します。
+- 互換モードとして `generator_jsonl` も利用可能ですが、厳密評価には `cache_snapshot_jsonl` を推奨します。

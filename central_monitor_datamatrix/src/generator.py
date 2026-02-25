@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import random
 import time
 from datetime import datetime, timedelta, timezone
@@ -104,6 +105,36 @@ def write_truth_record(out_path: str, record: dict[str, Any], append: bool) -> b
         return False
 
 
+def load_packet_id(state_path: Path) -> int:
+    if not state_path.exists():
+        return 0
+    try:
+        return int(state_path.read_text(encoding="utf-8").strip() or "0")
+    except Exception:
+        logger.warning("failed to load packet_id state from %s; reset to 0", state_path)
+        return 0
+
+
+def save_packet_id(state_path: Path, value: int) -> None:
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = state_path.with_name(f"{state_path.name}.tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        f.write(str(int(value)))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, state_path)
+
+
+def write_cache_snapshot(cache_path: Path, payload: dict[str, Any]) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = cache_path.with_name(f"{cache_path.name}.tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, cache_path)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
@@ -121,6 +152,8 @@ def main() -> None:
         type=_to_bool,
         help="trueなら送信したHL7全文をtruthに含める",
     )
+    ap.add_argument("--cache-out", default="monitor_cache.json", help="monitor_cache.json 出力先")
+    ap.add_argument("--packet-id-state", help="packet_id 永続化ファイルパス（省略時はcache横）")
     args = ap.parse_args()
 
     if args.truth_every_n < 1:
@@ -132,6 +165,11 @@ def main() -> None:
     beds = [f"BED{i:02d}" for i in range(1, 7)]
     loop = 0
     truth_append_mode = bool(args.append_truth)
+
+    cache_path = Path(args.cache_out)
+    packet_state_path = Path(args.packet_id_state) if args.packet_id_state else cache_path.with_suffix(".packet_id")
+    packet_id = load_packet_id(packet_state_path)
+
     while args.count < 0 or loop < args.count:
         cycle_ts = datetime.now(JST)
         cycle_iso = cycle_ts.isoformat(timespec="milliseconds")
@@ -160,10 +198,23 @@ def main() -> None:
                 )
             msg_id += 1
 
+        packet_id += 1
+        cache_record = {
+            "epoch_ms": cycle_epoch_ms,
+            "ts": cycle_iso,
+            "packet_id": packet_id,
+            "source": "generator",
+            "beds": cycle_beds,
+        }
+        write_cache_snapshot(cache_path, cache_record)
+        save_packet_id(packet_state_path, packet_id)
+
         if args.truth_out and ((loop + 1) % args.truth_every_n == 0):
             truth_record: dict[str, Any] = {
                 "ts": cycle_iso,
                 "epoch_ms": cycle_epoch_ms,
+                "packet_id": packet_id,
+                "source": "generator",
                 "beds": cycle_beds,
             }
             if args.truth_include_hl7:

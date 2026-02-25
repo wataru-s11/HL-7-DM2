@@ -94,6 +94,7 @@ def main() -> int:
 
             record = {
                 "timestamp_ms": None,
+                "packet_id": None,
                 "decoded_at_ms": decoded_at_ms,
                 "source_image": str(image_path),
                 "decode_ok": False,
@@ -113,6 +114,7 @@ def main() -> int:
                 payload = dm_datamatrix.decode_payload_from_bgr_image(image_bgr)
 
                 record["timestamp_ms"] = payload.get("timestamp_ms")
+                record["packet_id"] = payload.get("packet_id")
                 record["beds"] = payload.get("beds")
                 record["decode_ok"] = True
                 record["crc_ok"] = True

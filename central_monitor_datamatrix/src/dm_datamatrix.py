@@ -76,6 +76,11 @@ def load_cache_with_retry(cache_path: Path, retries: int = 3, retry_delay_sec: f
 def generate_datamatrix_png_from_cache(cache_path: Path, out_path: Path, beds_count: int = 6) -> tuple[dict[str, int], int]:
     cache, attempt = load_cache_with_retry(cache_path)
 
+    return generate_datamatrix_png_from_cache_data(cache, out_path, beds_count=beds_count), attempt
+
+
+def generate_datamatrix_png_from_cache_data(cache: dict[str, Any], out_path: Path, beds_count: int = 6) -> dict[str, int]:
+
     blob, packet_bytes = build_blob_from_cache(cache, beds_count=beds_count)
     result = generate_datamatrix_png(blob, out_path)
     if result.returncode != 0:
@@ -89,7 +94,7 @@ def generate_datamatrix_png_from_cache(cache_path: Path, out_path: Path, beds_co
     if not out_path.exists() or out_path.stat().st_size <= 0:
         raise RuntimeError("zint.exe completed but output PNG is missing or empty")
 
-    return {"blob_size": len(blob), "packet_size": len(packet_bytes)}, attempt
+    return {"blob_size": len(blob), "packet_size": len(packet_bytes)}
 
 
 def decode_payload_from_bgr_image(image_bgr) -> dict[str, Any]:
