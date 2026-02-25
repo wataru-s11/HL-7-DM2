@@ -9,36 +9,30 @@ VERSION = 1
 BEDS_6 = ["BED01", "BED02", "BED03", "BED04", "BED05", "BED06"]
 PARAMS_20 = [
     "HR",
+    "ART_S",
+    "ART_D",
+    "ART_M",
+    "CVP_M",
+    "RAP_M",
     "SpO2",
+    "TSKIN",
+    "TRECT",
+    "rRESP",
+    "EtCO2",
     "RR",
-    "TEMP",
-    "SBP",
-    "DBP",
-    "MAP",
-    "PR",
-    "etCO2",
-    "FiO2",
-    "NIBP_SYS",
-    "NIBP_DIA",
-    "NIBP_MAP",
-    "CVP",
-    "ICP",
-    "RESP_RATE",
-    "PULSE",
-    "CO2",
-    "O2_FLOW",
-    "BT",
+    "VTe",
+    "VTi",
+    "Ppeak",
+    "PEEP",
+    "O2conc",
+    "NO",
+    "BSR1",
+    "BSR2",
 ]
 
 SCALE_MAP: dict[str, int] = {
-    "TEMP": 10,
-    "etCO2": 10,
-    "FiO2": 10,
-    "CVP": 10,
-    "ICP": 10,
-    "CO2": 10,
-    "O2_FLOW": 10,
-    "BT": 10,
+    "TSKIN": 10,
+    "TRECT": 10,
 }
 
 _HEADER_STRUCT = struct.Struct("<4sBBBBq")
@@ -106,9 +100,11 @@ def _to_numeric(value: Any) -> int | float | None:
     return int(numeric) if numeric.is_integer() else numeric
 
 
-def _sanitize_vitals(vitals: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def _sanitize_vitals(vitals: dict[str, Any], allowed_params: set[str] | None = None) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for vital_code, vital_raw in vitals.items():
+        if allowed_params is not None and str(vital_code) not in allowed_params:
+            continue
         if not isinstance(vital_raw, dict):
             continue
 
@@ -132,13 +128,14 @@ def _sanitize_vitals(vitals: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 def make_payload(monitor_cache: dict[str, Any], seq: int) -> dict[str, Any]:
     beds: dict[str, Any] = {}
+    allowed = set(PARAMS_20)
     for bed_id, bed_data in (monitor_cache.get("beds") or {}).items():
         if not isinstance(bed_data, dict):
             continue
         vitals_raw = bed_data.get("vitals")
         if not isinstance(vitals_raw, dict):
             continue
-        vitals = _sanitize_vitals(vitals_raw)
+        vitals = _sanitize_vitals(vitals_raw, allowed_params=allowed)
         if vitals:
             beds[str(bed_id)] = {"vitals": vitals}
 
@@ -228,7 +225,10 @@ def parse_packet(packet_bytes: bytes, beds: list[str] | None = None, params: lis
         for param in params:
             present, raw_value = _CELL_STRUCT.unpack_from(packet_bytes, offset)
             offset += _CELL_STRUCT.size
-            bed_payload["params"][param] = _dequantize(param, present, raw_value)
+            decoded = _dequantize(param, present, raw_value)
+            bed_payload["params"][param] = decoded
+            if int(decoded.get("present", 0)) == 1:
+                bed_payload[param] = decoded.get("value")
 
         out_beds[bed_id] = bed_payload
 

@@ -13,27 +13,27 @@ from hl7_sender import send_mllp_message
 
 logger = logging.getLogger(__name__)
 
-VITAL_SPECS = [
-    ("HR", "HeartRate", "bpm", 55, 110),
-    ("SpO2", "SpO2", "%", 90, 100),
-    ("RR", "RespRate", "rpm", 10, 24),
-    ("TEMP", "Temperature", "C", 360, 390),
-    ("SBP", "SystolicBP", "mmHg", 90, 160),
-    ("DBP", "DiastolicBP", "mmHg", 50, 100),
-    ("MAP", "MeanArterialPressure", "mmHg", 60, 120),
-    ("PR", "PulseRate", "bpm", 55, 120),
-    ("etCO2", "EndTidalCO2", "mmHg", 25, 50),
-    ("FiO2", "InspiredO2", "%", 210, 1000),
-    ("NIBP_SYS", "NIBP_Systolic", "mmHg", 90, 160),
-    ("NIBP_DIA", "NIBP_Diastolic", "mmHg", 50, 100),
-    ("NIBP_MAP", "NIBP_Mean", "mmHg", 60, 120),
-    ("CVP", "CentralVenousPressure", "mmHg", 20, 150),
-    ("ICP", "IntracranialPressure", "mmHg", 50, 250),
-    ("RESP_RATE", "RespRateMonitor", "rpm", 10, 30),
-    ("PULSE", "Pulse", "bpm", 55, 120),
-    ("CO2", "CO2", "mmHg", 250, 500),
-    ("O2_FLOW", "O2Flow", "L/min", 0, 150),
-    ("BT", "BodyTemperature", "C", 360, 390),
+GENERATOR_VITAL_SPECS = [
+    ("HR", "HeartRate", "bpm", 50.0, 180.0, 0),
+    ("ART_S", "ArterialSystolic", "mmHg", 40.0, 140.0, 0),
+    ("ART_D", "ArterialDiastolic", "mmHg", 20.0, 90.0, 0),
+    ("ART_M", "ArterialMean", "mmHg", 30.0, 110.0, 0),
+    ("CVP_M", "CentralVenousMean", "mmHg", -5.0, 25.0, 0),
+    ("RAP_M", "RightAtrialMean", "mmHg", -5.0, 20.0, 0),
+    ("SpO2", "SpO2", "%", 85.0, 100.0, 0),
+    ("TSKIN", "SkinTemperature", "C", 30.0, 40.0, 1),
+    ("TRECT", "RectalTemperature", "C", 34.0, 41.0, 1),
+    ("rRESP", "RawRespirationRate", "rpm", 0.0, 60.0, 0),
+    ("EtCO2", "EndTidalCO2", "mmHg", 15.0, 60.0, 0),
+    ("RR", "RespiratoryRate", "rpm", 5.0, 60.0, 0),
+    ("VTe", "ExpiratoryTidalVolume", "mL", 0.0, 800.0, 0),
+    ("VTi", "InspiratoryTidalVolume", "mL", 0.0, 800.0, 0),
+    ("Ppeak", "PeakAirwayPressure", "cmH2O", 5.0, 50.0, 0),
+    ("PEEP", "PositiveEndExpiratoryPressure", "cmH2O", 0.0, 20.0, 0),
+    ("O2conc", "OxygenConcentration", "%", 21.0, 100.0, 0),
+    ("NO", "NitricOxide", "ppm", 0.0, 40.0, 0),
+    ("BSR1", "BurstSuppressionRatio1", "%", 0.0, 100.0, 0),
+    ("BSR2", "BurstSuppressionRatio2", "%", 0.0, 100.0, 0),
 ]
 
 
@@ -62,13 +62,11 @@ def build_patient(bed: str) -> dict[str, str]:
 
 def build_bed_payload() -> dict[str, dict[str, Any]]:
     vitals: dict[str, dict[str, str | float]] = {}
-    for code, _, unit, minimum, maximum in VITAL_SPECS:
-        raw_value = random.randint(minimum, maximum)
-        value = (
-            raw_value / 10
-            if code in {"TEMP", "FiO2", "CVP", "ICP", "CO2", "O2_FLOW", "BT", "etCO2"}
-            else float(raw_value)
-        )
+    for code, _, unit, minimum, maximum, decimals in GENERATOR_VITAL_SPECS:
+        if decimals > 0:
+            value = round(random.uniform(minimum, maximum), decimals)
+        else:
+            value = float(random.randint(int(minimum), int(maximum)))
         vitals[code] = {"value": value, "unit": unit, "flag": ""}
     return {"vitals": vitals}
 
@@ -83,7 +81,7 @@ def build_message(bed: str, msg_id: int, patient: dict[str, str], vitals: dict[s
     )
 
     obx_segments: list[str] = []
-    for index, (code, label, _, _, _) in enumerate(VITAL_SPECS, start=1):
+    for index, (code, label, _, _, _, _) in enumerate(GENERATOR_VITAL_SPECS, start=1):
         vital = vitals[code]
         value_text = str(vital["value"])
         unit = str(vital["unit"])
