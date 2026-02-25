@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import tkinter as tk
 from pathlib import Path
@@ -92,15 +93,18 @@ class DMDisplayApp:
 
         self.last_cache_mtime_ns = current_mtime_ns
         try:
-            sizes = dm_datamatrix.generate_datamatrix_png_from_cache(self.cache_path, self.out_path)
+            sizes, read_attempt = dm_datamatrix.generate_datamatrix_png_from_cache(self.cache_path, self.out_path)
             logger.info(
-                "regenerated datamatrix png from cache: %s (packet=%d, blob=%d)",
+                "regenerated datamatrix png from cache: %s (packet=%d, blob=%d, read_attempt=%d)",
                 self.out_path,
                 sizes["packet_size"],
                 sizes["blob_size"],
+                read_attempt,
             )
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("cache read retry exhausted; skip refresh and keep previous png: %s", exc)
         except Exception as exc:
-            logger.error("failed to regenerate datamatrix png: %s", exc)
+            logger.warning("failed to regenerate datamatrix png; keeping previous png: %s", exc)
 
     def refresh_image(self) -> None:
         self._refresh_png_if_cache_updated()

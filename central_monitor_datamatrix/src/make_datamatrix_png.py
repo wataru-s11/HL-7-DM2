@@ -32,7 +32,7 @@ def main() -> int:
     out_path = Path(args.out)
 
     try:
-        sizes = dm_datamatrix.generate_datamatrix_png_from_cache(
+        sizes, read_attempt = dm_datamatrix.generate_datamatrix_png_from_cache(
             cache_path=cache_path,
             out_path=out_path,
             beds_count=args.beds,
@@ -40,6 +40,7 @@ def main() -> int:
         logger.info("saved DataMatrix PNG: %s", out_path)
         logger.info("blob size=%d bytes", sizes["blob_size"])
         logger.info("packet size=%d bytes", sizes["packet_size"])
+        logger.info("cache read attempt=%d", read_attempt)
         return 0
     except FileNotFoundError as exc:
         logger.error("file not found: %s", exc)

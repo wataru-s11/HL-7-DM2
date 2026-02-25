@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -58,9 +59,22 @@ def generate_datamatrix_png(blob: bytes, out_path: Path, zint_exe: Path | None =
         bin_file.unlink(missing_ok=True)
 
 
-def generate_datamatrix_png_from_cache(cache_path: Path, out_path: Path, beds_count: int = 6) -> dict[str, int]:
-    with cache_path.open("r", encoding="utf-8") as f:
-        cache = json.load(f)
+def load_cache_with_retry(cache_path: Path, retries: int = 3, retry_delay_sec: float = 0.05) -> tuple[dict[str, Any], int]:
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            with cache_path.open("r", encoding="utf-8") as f:
+                return json.load(f), attempt
+        except (json.JSONDecodeError, OSError) as exc:
+            last_exc = exc
+            if attempt < retries:
+                time.sleep(retry_delay_sec)
+    assert last_exc is not None
+    raise last_exc
+
+
+def generate_datamatrix_png_from_cache(cache_path: Path, out_path: Path, beds_count: int = 6) -> tuple[dict[str, int], int]:
+    cache, attempt = load_cache_with_retry(cache_path)
 
     blob, packet_bytes = build_blob_from_cache(cache, beds_count=beds_count)
     result = generate_datamatrix_png(blob, out_path)
@@ -75,7 +89,7 @@ def generate_datamatrix_png_from_cache(cache_path: Path, out_path: Path, beds_co
     if not out_path.exists() or out_path.stat().st_size <= 0:
         raise RuntimeError("zint.exe completed but output PNG is missing or empty")
 
-    return {"blob_size": len(blob), "packet_size": len(packet_bytes)}
+    return {"blob_size": len(blob), "packet_size": len(packet_bytes)}, attempt
 
 
 def decode_payload_from_bgr_image(image_bgr) -> dict[str, Any]:
