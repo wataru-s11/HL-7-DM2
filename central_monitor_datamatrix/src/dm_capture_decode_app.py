@@ -86,11 +86,18 @@ def main() -> int:
     logger.info("roi_global=(%d, %d, %d, %d)", roi_left, roi_top, args.width, args.height)
     logger.info("start capture loop interval=%.2fs roi=(%d,%d,%d,%d)", args.interval_sec, roi_left, roi_top, args.width, args.height)
 
+    sequence = 0
+
     try:
         while True:
             decoded_at_ms = now_ms()
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            image_path = captures_dir / f"{ts}.png"
+            dt_now = datetime.now()
+            # 秒単位ファイル名だと短い間隔で同名上書きが起き、
+            # 監視時に「更新されていない」ように見えることがあるため
+            # ミリ秒+連番で常に一意なキャプチャ名にする。
+            ts = dt_now.strftime("%Y%m%d_%H%M%S")
+            image_path = captures_dir / f"{ts}_{dt_now.microsecond // 1000:03d}_{sequence:06d}.png"
+            sequence += 1
 
             record = {
                 "timestamp_ms": decoded_at_ms,
