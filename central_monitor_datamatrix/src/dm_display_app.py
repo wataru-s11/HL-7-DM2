@@ -4,6 +4,9 @@ import argparse
 import json
 import logging
 import os
+import secrets
+import threading
+import time
 import tkinter as tk
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,22 +39,44 @@ def _load_packet_id(state_path: Path) -> int:
 
 def _save_packet_id(state_path: Path, packet_id: int) -> None:
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = state_path.with_name(f"{state_path.name}.tmp")
-    with tmp_path.open("w", encoding="utf-8") as f:
-        f.write(str(packet_id))
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, state_path)
+    _write_text_atomic_with_retry(state_path, str(packet_id))
 
 
 def _write_cache(cache_path: Path, cache: dict[str, Any]) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = cache_path.with_name(f"{cache_path.name}.tmp")
-    with tmp_path.open("w", encoding="utf-8") as f:
-        json.dump(cache, f, ensure_ascii=False, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, cache_path)
+    _write_text_atomic_with_retry(cache_path, json.dumps(cache, ensure_ascii=False, indent=2))
+
+
+def _write_text_atomic_with_retry(path: Path, text: str, retries: int = 5, base_delay_sec: float = 0.02) -> None:
+    last_error: PermissionError | None = None
+    for attempt in range(1, retries + 1):
+        token = secrets.token_hex(4)
+        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{token}.tmp")
+        try:
+            with tmp_path.open("w", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            logger.warning(
+                "atomic replace retry due to PermissionError: target=%s attempt=%d/%d error=%s",
+                path,
+                attempt,
+                retries,
+                exc,
+            )
+            tmp_path.unlink(missing_ok=True)
+            if attempt < retries:
+                time.sleep(base_delay_sec * attempt)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+    assert last_error is not None
+    logger.error("atomic replace failed after retries: target=%s", path)
+    raise last_error
 
 
 def _ensure_cache_metadata(cache: dict[str, Any], cache_path: Path) -> tuple[dict[str, Any], bool]:
@@ -282,8 +307,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Display latest DataMatrix image")
     parser.add_argument(
         "--cache",
-        default="monitor_cache.json",
-        help="Path to monitor_cache.json (reserved for compatibility)",
+        default="generator_cache.json",
+        help="Path to generator truth cache (separate from receiver cache)",
     )
     parser.add_argument("--out", default="dataset/dm_latest.png", help="Output PNG path")
     parser.add_argument("--interval-sec", type=float, default=1.0, help="Refresh interval seconds")

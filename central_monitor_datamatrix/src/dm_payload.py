@@ -54,6 +54,12 @@ class SeqCounter:
         return self._value
 
 
+
+
+def _epoch_ms_to_iso(epoch_ms: int) -> str:
+    return datetime.fromtimestamp(epoch_ms / 1000.0, tz=timezone.utc).isoformat(timespec="milliseconds")
+
+
 def _to_epoch_ms(value: Any) -> int:
     if value is None:
         return int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -139,11 +145,14 @@ def make_payload(monitor_cache: dict[str, Any], seq: int) -> dict[str, Any]:
         if vitals:
             beds[str(bed_id)] = {"vitals": vitals}
 
+    epoch_ms = _to_epoch_ms(monitor_cache.get("epoch_ms") or monitor_cache.get("ts") or monitor_cache.get("timestamp"))
+
     return {
         "v": schema_version,
         "schema_version": schema_version,
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "timestamp_ms": _to_epoch_ms(monitor_cache.get("epoch_ms") or monitor_cache.get("ts") or monitor_cache.get("timestamp")),
+        "ts": monitor_cache.get("ts") if isinstance(monitor_cache.get("ts"), str) else _epoch_ms_to_iso(epoch_ms),
+        "epoch_ms": epoch_ms,
+        "timestamp_ms": epoch_ms,
         "packet_id": int(monitor_cache.get("packet_id") or 0),
         "seq": seq,
         "beds": beds,
@@ -246,7 +255,9 @@ def parse_packet(packet_bytes: bytes, beds: list[str] | None = None, params: lis
         "schema_version": version,
         "beds_count": beds_count,
         "params_count": params_count,
+        "epoch_ms": timestamp_ms,
         "timestamp_ms": timestamp_ms,
+        "ts": _epoch_ms_to_iso(timestamp_ms),
         "packet_id": packet_id,
         "beds": out_beds,
     }

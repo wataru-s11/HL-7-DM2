@@ -33,7 +33,7 @@ HL7受信で得たベッド別vitalsを、PHIを含まないDataMatrixペイロ�
 ## 生成/復号コマンド
 
 ```bash
-python src/make_datamatrix_png.py --cache monitor_cache.json --out dataset/dm.png
+python src/make_datamatrix_png.py --cache generator_cache.json --out dataset/dm.png
 python src/decode_datamatrix_png.py --image dataset/dm.png
 ```
 
@@ -42,13 +42,13 @@ python src/decode_datamatrix_png.py --image dataset/dm.png
 ### 1) HL7データ生成（任意）
 
 ```bash
-python src/generator.py --host 127.0.0.1 --port 2575 --interval 1.0
+python src/generator.py --host 127.0.0.1 --port 2575 --interval 1.0 --cache-out generator_cache.json --truth-out dataset/20260225/generator_results.jsonl
 ```
 
 ### 2) HL7 receiver起動（cache更新）
 
 ```bash
-python src/hl7_receiver.py --host 0.0.0.0 --port 2575 --cache monitor_cache.json
+python src/hl7_receiver.py --host 0.0.0.0 --port 2575 --cache receiver_cache.json
 ```
 
 ### 3) 送信側アプリ: DataMatrix小窓表示
@@ -56,7 +56,7 @@ python src/hl7_receiver.py --host 0.0.0.0 --port 2575 --cache monitor_cache.json
 cacheファイルの更新mtimeを監視し、更新時に `dataset/dm_latest.png` を再生成して表示更新します。
 
 ```bash
-python src/dm_display_app.py --cache monitor_cache.json --out dataset/dm_latest.png --interval-sec 1 --monitor-index 1 --margin-right-px 40
+python src/dm_display_app.py --cache generator_cache.json --out dataset/dm_latest.png --interval-sec 1 --monitor-index 1 --margin-right-px 40
 ```
 
 - デフォルトサイズは `420x420` 固定
@@ -70,7 +70,7 @@ python src/dm_capture_decode_app.py --interval-sec 10 --left 1400 --top 20 --wid
 ```
 
 - 保存画像: `dataset/captures/YYYYMMDD_HHMMSS.png`
-- JSONL: 1行1レコード（`timestamp_ms`, `packet_id`, `decoded_at_ms`, `source_image`, `decode_ok`, `crc_ok`, `beds`）
+- JSONL: 1行1レコード（`epoch_ms`, `timestamp_ms`, `ts`, `packet_id`, `decoded_at_ms`, `source_image`, `decode_ok`, `crc_ok`, `beds`）
 - decode失敗時は `decode_ok:false` と `error` を記録（プロセスは継続）
 
 ## ROI決めのコツ
@@ -89,7 +89,7 @@ python src/dm_capture_decode_app.py --interval-sec 10 --left 1400 --top 20 --wid
 
 ## 検証ワークフロー（packet_id優先の1:1突合）
 
-1. `generator.py` で `monitor_cache.json` を更新（`epoch_ms`/`packet_id` を付与）
+1. `generator.py` は `generator_cache.json` を更新し、truth(`generator_results.jsonl`) と同じ `epoch_ms`/`packet_id`/`ts` を保持
 2. `dm_display_app.py` で DataMatrix を再生成し、同時に `dataset/YYYYMMDD/cache_snapshots.jsonl` を追記
 3. `dm_capture_decode_app.py` で decode 結果を `decoded_results.jsonl` へ追記
 4. `validator_dm.py` を `cache_snapshot_jsonl` モードで実行して評価
@@ -98,5 +98,16 @@ python src/dm_capture_decode_app.py --interval-sec 10 --left 1400 --top 20 --wid
 python validator_dm.py --decoded-results dataset/decoded_results.jsonl --truth-mode cache_snapshot_jsonl --cache-snapshots dataset/20260225/cache_snapshots.jsonl --out dataset/dm_validation_results.jsonl --summary-out dataset/dm_validation_summary.json --last 200 --tolerance-sec 2.0 --debug-one
 ```
 
-- `validator_dm.py` は `packet_id` 完全一致を最優先し、無い場合のみ `timestamp_ms` と `epoch_ms` を `--tolerance-sec` で近傍一致します。
+- `validator_dm.py` は `packet_id` 完全一致を最優先し、無い場合は `epoch_ms` で近傍一致します（`--tolerance-sec` は補助）。
+- summary には `matched_by`（`packet_id` / `epoch_ms` / `fallback_time`）と `delta_ms` 統計を出力します。
 - 互換モードとして `generator_jsonl` も利用可能ですが、厳密評価には `cache_snapshot_jsonl` を推奨します。
+
+
+## デフォルトのデータフロー（競合回避）
+
+- `hl7_receiver.py` の既定cacheは `receiver_cache.json`（受信観測用）
+- `generator.py` の既定cacheは `generator_cache.json`（truthソース）
+- `dm_display_app.py` は既定で `generator_cache.json` を読む
+
+これにより generator/receiver が同じ cache を同時上書きせず、Windows の `WinError 5` を回避しやすくしています。
+さらに atomic write は固定tmp名を廃止し、`PID + thread_id + random` tmp名と `PermissionError` リトライ付きに強化しています。

@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import random
+import secrets
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -117,22 +119,44 @@ def load_packet_id(state_path: Path) -> int:
 
 def save_packet_id(state_path: Path, value: int) -> None:
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = state_path.with_name(f"{state_path.name}.tmp")
-    with tmp_path.open("w", encoding="utf-8") as f:
-        f.write(str(int(value)))
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, state_path)
+    _write_text_atomic_with_retry(state_path, str(int(value)))
+
+
+def _write_text_atomic_with_retry(path: Path, text: str, retries: int = 5, base_delay_sec: float = 0.02) -> None:
+    last_error: PermissionError | None = None
+    for attempt in range(1, retries + 1):
+        token = secrets.token_hex(4)
+        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{token}.tmp")
+        try:
+            with tmp_path.open("w", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            logger.warning(
+                "atomic replace retry due to PermissionError: target=%s attempt=%d/%d error=%s",
+                path,
+                attempt,
+                retries,
+                exc,
+            )
+            tmp_path.unlink(missing_ok=True)
+            if attempt < retries:
+                time.sleep(base_delay_sec * attempt)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+    assert last_error is not None
+    logger.error("atomic replace failed after retries: target=%s", path)
+    raise last_error
 
 
 def write_cache_snapshot(cache_path: Path, payload: dict[str, Any]) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = cache_path.with_name(f"{cache_path.name}.tmp")
-    with tmp_path.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, cache_path)
+    _write_text_atomic_with_retry(cache_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def main() -> None:
@@ -152,7 +176,7 @@ def main() -> None:
         type=_to_bool,
         help="trueなら送信したHL7全文をtruthに含める",
     )
-    ap.add_argument("--cache-out", default="monitor_cache.json", help="monitor_cache.json 出力先")
+    ap.add_argument("--cache-out", default="generator_cache.json", help="generator用cache出力先 (receiverとは分離推奨)")
     ap.add_argument("--packet-id-state", help="packet_id 永続化ファイルパス（省略時はcache横）")
     args = ap.parse_args()
 
