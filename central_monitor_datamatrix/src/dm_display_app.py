@@ -179,13 +179,13 @@ class DMDisplayApp:
         if self.last_cache_mtime_ns == current_mtime_ns:
             return
 
-        self.last_cache_mtime_ns = current_mtime_ns
         try:
             cache, read_attempt = dm_datamatrix.load_cache_with_retry(self.cache_path)
             cache = _validate_cache_metadata(cache)
             sizes = dm_datamatrix.generate_datamatrix_png_from_cache_data(cache, self.out_path)
             snapshot_path = _resolve_snapshot_path(self.out_path, int(cache["epoch_ms"]))
             appended = _append_cache_snapshot(snapshot_path, cache)
+            self.last_cache_mtime_ns = current_mtime_ns
 
             logger.info(
                 "regenerated datamatrix png from cache: %s (packet=%d, blob=%d, read_attempt=%d, snapshot_appended=%s)",
