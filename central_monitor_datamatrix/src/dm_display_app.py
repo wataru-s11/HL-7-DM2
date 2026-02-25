@@ -5,6 +5,7 @@ import json
 import logging
 import time
 import tkinter as tk
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,16 +21,44 @@ WINDOW_WIDTH = 420
 WINDOW_HEIGHT = 420
 
 
-def _ensure_cache_metadata(cache: dict[str, Any], fallback_epoch_ms: int, fallback_packet_id: int) -> dict[str, Any]:
+class CacheUpdateMode:
+    GENERATOR = "generator"
+    RECEIVER = "receiver"
+
+
+def _to_epoch_ms(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return int(float(text))
+        except ValueError:
+            return None
+    return None
+
+
+def _ensure_cache_metadata(cache: dict[str, Any], fallback_epoch_ms: int) -> dict[str, Any]:
     cache = dict(cache)
 
-    epoch_ms = cache.get("epoch_ms")
-    if isinstance(epoch_ms, bool) or not isinstance(epoch_ms, int):
-        cache["epoch_ms"] = fallback_epoch_ms
+    epoch_ms = _to_epoch_ms(cache.get("epoch_ms"))
+    if epoch_ms is None:
+        epoch_ms = _to_epoch_ms(cache.get("timestamp_ms"))
+    if epoch_ms is None and isinstance(cache.get("ts"), str):
+        ts_text = cache["ts"].strip().replace("Z", "+00:00")
+        try:
+            epoch_ms = int(datetime.fromisoformat(ts_text).timestamp() * 1000)
+        except ValueError:
+            epoch_ms = None
+    cache["epoch_ms"] = epoch_ms if epoch_ms is not None else fallback_epoch_ms
 
     packet_id = cache.get("packet_id")
     if isinstance(packet_id, bool) or not isinstance(packet_id, int):
-        cache["packet_id"] = fallback_packet_id
+        cache["packet_id"] = None
 
     ts = cache.get("ts")
     if not isinstance(ts, str) or not ts.strip():
@@ -54,6 +83,7 @@ class DMDisplayApp:
         monitor_index: int,
         margin_right_px: int,
         margin_top_px: int,
+        cache_type: str,
         debug: bool = False,
     ) -> None:
         self.out_path = out_path
@@ -61,6 +91,7 @@ class DMDisplayApp:
         self.monitor_index = monitor_index
         self.margin_right_px = margin_right_px
         self.margin_top_px = margin_top_px
+        self.cache_type = cache_type
         self.debug = debug
 
         monitors = get_monitors()
@@ -104,12 +135,32 @@ class DMDisplayApp:
         self.cache_path: Path | None = None
         self.last_seen_epoch_ms: int | None = None
         self.last_seen_packet_id: int | None = None
+        self.last_seen_mtime_ns: int | None = None
+        self.warned_missing_packet_id = False
         self.no_update_count = 0
         self.read_failures = 0
         self.tick_count = 0
 
     def set_cache_path(self, cache_path: Path) -> None:
         self.cache_path = cache_path
+
+    def _is_cache_updated(self, current_epoch_ms: int | None, current_packet_id: int | None, current_mtime_ns: int) -> bool:
+        if self.cache_type == CacheUpdateMode.RECEIVER:
+            return (
+                self.last_seen_mtime_ns != current_mtime_ns
+                or self.last_seen_epoch_ms != current_epoch_ms
+            )
+
+        if current_packet_id is not None and self.last_seen_packet_id is not None:
+            return (
+                self.last_seen_packet_id != current_packet_id
+                or self.last_seen_epoch_ms != current_epoch_ms
+            )
+
+        return (
+            self.last_seen_epoch_ms != current_epoch_ms
+            or self.last_seen_mtime_ns != current_mtime_ns
+        )
 
     def _refresh_png_if_cache_updated(self) -> None:
         if self.cache_path is None:
@@ -118,15 +169,24 @@ class DMDisplayApp:
         try:
             self.tick_count += 1
             cache, read_attempt = dm_datamatrix.load_cache_with_retry(self.cache_path)
+            mtime_ns = self.cache_path.stat().st_mtime_ns
             self.read_failures = 0
 
             fallback_epoch_ms = int(time.time() * 1000)
-            fallback_packet_id = (self.last_seen_packet_id + 1) if self.last_seen_packet_id is not None else 1
-            cache = _ensure_cache_metadata(cache, fallback_epoch_ms=fallback_epoch_ms, fallback_packet_id=fallback_packet_id)
+            cache = _ensure_cache_metadata(cache, fallback_epoch_ms=fallback_epoch_ms)
 
-            current_epoch_ms = int(cache["epoch_ms"])
-            current_packet_id = int(cache["packet_id"])
-            if self.last_seen_epoch_ms == current_epoch_ms and self.last_seen_packet_id == current_packet_id:
+            current_epoch_ms = _to_epoch_ms(cache.get("epoch_ms"))
+            current_packet_id = cache.get("packet_id") if isinstance(cache.get("packet_id"), int) else None
+
+            if current_packet_id is None and not self.warned_missing_packet_id:
+                self.warned_missing_packet_id = True
+                logger.warning(
+                    "cache has no packet_id. Falling back to epoch_ms/mtime update detection. cache=%s cache_type=%s",
+                    self.cache_path,
+                    self.cache_type,
+                )
+
+            if not self._is_cache_updated(current_epoch_ms, current_packet_id, mtime_ns):
                 self.no_update_count += 1
                 if self.tick_count % 10 == 0:
                     logger.info(
@@ -138,34 +198,31 @@ class DMDisplayApp:
                         read_attempt,
                     )
                 if self.debug:
-                    logger.info(
-                        "debug: cache metadata unchanged epoch_ms=%d packet_id=%d",
+                    logger.debug(
+                        "packet_idが変わらなかったので再生成しなかった: epoch_ms=%s packet_id=%s mtime_ns=%s cache_type=%s",
                         current_epoch_ms,
                         current_packet_id,
+                        mtime_ns,
+                        self.cache_type,
                     )
                 return
 
             sizes = dm_datamatrix.generate_datamatrix_png_from_cache_data(cache, self.out_path)
             self.last_seen_epoch_ms = current_epoch_ms
             self.last_seen_packet_id = current_packet_id
+            self.last_seen_mtime_ns = mtime_ns
             self.no_update_count = 0
 
             logger.info(
-                "regenerated datamatrix png from cache(read-only): %s (packet=%d, cache_packet_id=%d, epoch_ms=%d, blob=%d, read_attempt=%d)",
+                "regenerated datamatrix png from cache(read-only): %s (packet=%d, cache_packet_id=%s, epoch_ms=%s, blob=%d, read_attempt=%d, cache_type=%s)",
                 self.out_path,
                 sizes["packet_size"],
                 current_packet_id,
                 current_epoch_ms,
                 sizes["blob_size"],
                 read_attempt,
+                self.cache_type,
             )
-            if self.tick_count % 10 == 0:
-                logger.info(
-                    "heartbeat: tick=%d updated epoch_ms=%d packet_id=%d",
-                    self.tick_count,
-                    current_epoch_ms,
-                    current_packet_id,
-                )
         except FileNotFoundError:
             if self.debug:
                 logger.info("debug: cache file not found yet: %s", self.cache_path)
@@ -205,14 +262,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cache",
         default="generator_cache.json",
-        help="Path to generator truth cache (separate from receiver cache)",
+        help="Path to generator_cache.json (truth cache). Avoid receiver/monitor cache for display updates.",
+    )
+    parser.add_argument(
+        "--cache-type",
+        choices=[CacheUpdateMode.GENERATOR, CacheUpdateMode.RECEIVER],
+        default=CacheUpdateMode.GENERATOR,
+        help="Cache update strategy: generator=packet_id+epoch_ms, receiver=mtime/epoch_ms fallback",
     )
     parser.add_argument("--out", default="dataset/dm_latest.png", help="Output PNG path")
     parser.add_argument("--interval-sec", type=float, default=1.0, help="Refresh interval seconds")
     parser.add_argument("--monitor-index", type=int, default=1, help="Monitor index")
     parser.add_argument("--margin-right-px", type=int, default=40, help="Right margin in pixels")
     parser.add_argument("--margin-top-px", type=int, default=0, help="Top margin in pixels")
-    parser.add_argument("--debug", action="store_true", help="Show last DM epoch_ms/packet_id log")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logs for update detection details")
     parser.add_argument(
         "--list-monitors",
         action="store_true",
@@ -238,7 +301,7 @@ def list_monitors() -> None:
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    logging.basicConfig(level=logging.DEBUG if "--debug" in sys.argv else logging.INFO, format="%(levelname)s: %(message)s")
     args = parse_args()
 
     if args.list_monitors:
@@ -251,6 +314,7 @@ def main() -> int:
         monitor_index=args.monitor_index,
         margin_right_px=args.margin_right_px,
         margin_top_px=args.margin_top_px,
+        cache_type=args.cache_type,
         debug=args.debug,
     )
     app.set_cache_path(Path(args.cache))

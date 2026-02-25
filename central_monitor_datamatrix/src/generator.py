@@ -44,6 +44,7 @@ JST = timezone(timedelta(hours=9))
 WRITER_LOCK_TIMEOUT_SEC = 2.0
 CACHE_WRITE_RETRIES = 20
 CACHE_WRITE_RETRY_DELAY_SEC = 0.05
+CACHE_WRITE_RETRY_MAX_DELAY_SEC = 1.0
 
 
 def _to_bool(value: str | bool) -> bool:
@@ -131,6 +132,14 @@ def save_packet_id(state_path: Path, value: int) -> None:
     cache_io.atomic_write_json(state_path, {"packet_id": int(value)})
 
 
+
+
+def _permission_hint(cache_path: Path) -> str:
+    return (
+        "hint: the cache file may be held by antivirus/indexer/previewer or another writer process. "
+        f"Close JSON viewers and ensure only one writer targets {cache_path.name}."
+    )
+
 def write_cache_snapshot(cache_path: Path, payload: dict[str, Any]) -> None:
     last_exc: Exception | None = None
     for attempt in range(1, CACHE_WRITE_RETRIES + 1):
@@ -141,15 +150,17 @@ def write_cache_snapshot(cache_path: Path, payload: dict[str, Any]) -> None:
             last_exc = exc
             if attempt >= CACHE_WRITE_RETRIES:
                 break
-            time.sleep(CACHE_WRITE_RETRY_DELAY_SEC)
+            delay = min(CACHE_WRITE_RETRY_MAX_DELAY_SEC, CACHE_WRITE_RETRY_DELAY_SEC * (2 ** (attempt - 1)))
+            time.sleep(delay)
         except TimeoutError as exc:
             last_exc = exc
             if attempt >= CACHE_WRITE_RETRIES:
                 break
-            time.sleep(CACHE_WRITE_RETRY_DELAY_SEC)
+            delay = min(CACHE_WRITE_RETRY_MAX_DELAY_SEC, CACHE_WRITE_RETRY_DELAY_SEC * (2 ** (attempt - 1)))
+            time.sleep(delay)
 
     raise RuntimeError(
-        f"failed to update cache after retries: {cache_path}"
+        f"failed to update cache after retries: {cache_path}; {_permission_hint(cache_path)}"
     ) from last_exc
 
 

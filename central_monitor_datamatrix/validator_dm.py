@@ -280,11 +280,18 @@ def pick_truth(
     tolerance_sec: float,
     decoded_time_source: str,
 ) -> tuple[dict[str, Any] | None, float | None, str]:
-    if decoded_timestamp_ms is None or not truth_rows:
-        if decoded_packet_id is not None:
-            for row in truth_rows:
-                if normalize_packet_id(row.get("packet_id")) == decoded_packet_id:
-                    return row, None, "packet_id_fallback"
+    if not truth_rows:
+        return None, None, "none"
+
+    if decoded_packet_id is not None:
+        for row in truth_rows:
+            if normalize_packet_id(row.get("packet_id")) == decoded_packet_id:
+                delta = None
+                if decoded_timestamp_ms is not None:
+                    delta = float(row["epoch_ms"]) - float(decoded_timestamp_ms)
+                return row, delta, "packet_id"
+
+    if decoded_timestamp_ms is None:
         return None, None, "none"
 
     truth_ts = [float(r["epoch_ms"]) for r in truth_rows]
@@ -303,7 +310,7 @@ def pick_truth(
     if abs(delta) > tolerance_sec * 1000.0:
         return None, None, "none"
 
-    matched_by = "epoch_ms" if decoded_time_source in {"dm_epoch_ms", "cache_epoch_ms", "timestamp_ms"} else "fallback_time"
+    matched_by = "epoch_ms" if decoded_time_source in {"truth_epoch_ms", "dm_epoch_ms", "cache_epoch_ms", "timestamp_ms"} else "fallback_time"
     return truth_rows[best_i], delta, matched_by
 
 
@@ -392,6 +399,7 @@ def main() -> None:
     delta_t_values: list[float] = []
     matched_by_counter: Counter[str] = Counter()
     decoded_time_source_counter: Counter[str] = Counter()
+    packet_id_join_success_count = 0
     evaluated_on_success = matched_on_success = 0
     abs_errors_on_success: list[float] = []
     per_field: dict[str, dict[str, Any]] = {f: {"count": 0, "evaluated": 0, "matched": 0, "within_tol_matched": 0, "abs_errors": []} for f in VITAL_ORDER}
@@ -408,12 +416,18 @@ def main() -> None:
                 crc_fail_record_count += 1
 
             decoded_beds = rec.get("beds") if isinstance(rec.get("beds"), dict) else {}
-            decoded_packet_id = normalize_packet_id(rec.get("source_packet_id"))
+            decoded_packet_id = normalize_packet_id(rec.get("truth_packet_id"))
+            if decoded_packet_id is None:
+                decoded_packet_id = normalize_packet_id(rec.get("source_packet_id"))
             if decoded_packet_id is None:
                 decoded_packet_id = normalize_packet_id(rec.get("packet_id"))
 
-            decoded_timestamp_ms = normalize_epoch_ms(rec.get("cache_epoch_ms"))
-            decoded_time_source = "cache_epoch_ms" if decoded_timestamp_ms is not None else "none"
+            decoded_timestamp_ms = normalize_epoch_ms(rec.get("truth_epoch_ms"))
+            decoded_time_source = "truth_epoch_ms" if decoded_timestamp_ms is not None else "none"
+            if decoded_timestamp_ms is None:
+                decoded_timestamp_ms = normalize_epoch_ms(rec.get("cache_epoch_ms"))
+                if decoded_timestamp_ms is not None:
+                    decoded_time_source = "cache_epoch_ms"
             if decoded_timestamp_ms is None:
                 decoded_timestamp_ms = normalize_epoch_ms(rec.get("epoch_ms"))
                 if decoded_timestamp_ms is not None:
@@ -444,6 +458,8 @@ def main() -> None:
                 truth_missing_record_count += 1
             else:
                 matched_by_counter[matched_by] += 1
+                if matched_by == "packet_id":
+                    packet_id_join_success_count += 1
                 if delta_t is not None:
                     delta_t_values.append(delta_t)
                 if args.debug_one and not debug_done:
@@ -526,8 +542,11 @@ def main() -> None:
                         "packet_id": decoded_packet_id,
                         "cache_epoch_ms": normalize_epoch_ms(rec.get("cache_epoch_ms")),
                         "source_packet_id": normalize_packet_id(rec.get("source_packet_id")),
+                        "truth_epoch_ms": normalize_epoch_ms(rec.get("truth_epoch_ms")),
+                        "truth_packet_id": normalize_packet_id(rec.get("truth_packet_id")),
+                        "truth_ts": rec.get("truth_ts"),
                         "source": rec.get("source"),
-                        "truth_packet_id": normalize_packet_id(nearest_truth.get("packet_id")) if nearest_truth else None,
+                        "joined_truth_packet_id": normalize_packet_id(nearest_truth.get("packet_id")) if nearest_truth else None,
                         "decode_ok": decode_ok,
                         "crc_ok": crc_ok,
                         "decoded_value": dec_value,
@@ -577,6 +596,8 @@ def main() -> None:
         "truth_missing_records": truth_missing_record_count,
         "truth_missing_rate": (truth_missing_record_count / decoded_record_count) if decoded_record_count else None,
         "matched_by": dict(matched_by_counter),
+        "packet_id_joined_records": packet_id_join_success_count,
+        "packet_id_join_rate": (packet_id_join_success_count / decoded_record_count) if decoded_record_count else None,
         "delta_ms": {
             "mean": safe_mean(delta_t_values),
             "median": safe_median(delta_t_values),
