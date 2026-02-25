@@ -8,6 +8,8 @@ from pathlib import Path
 from PIL import Image, ImageTk
 from screeninfo import get_monitors
 
+import dm_datamatrix
+
 logger = logging.getLogger(__name__)
 
 WINDOW_WIDTH = 420
@@ -67,8 +69,41 @@ class DMDisplayApp:
         self.image_label = tk.Label(self.root)
         self.image_label.pack(fill=tk.BOTH, expand=True)
         self.photo = None
+        self.cache_path: Path | None = None
+        self.last_cache_mtime_ns: int | None = None
+
+    def set_cache_path(self, cache_path: Path) -> None:
+        self.cache_path = cache_path
+
+    def _refresh_png_if_cache_updated(self) -> None:
+        if self.cache_path is None:
+            return
+        try:
+            current_mtime_ns = self.cache_path.stat().st_mtime_ns
+        except FileNotFoundError:
+            logger.warning("cache file not found: %s", self.cache_path)
+            return
+        except Exception as exc:
+            logger.error("failed to inspect cache file %s: %s", self.cache_path, exc)
+            return
+
+        if self.last_cache_mtime_ns == current_mtime_ns:
+            return
+
+        self.last_cache_mtime_ns = current_mtime_ns
+        try:
+            sizes = dm_datamatrix.generate_datamatrix_png_from_cache(self.cache_path, self.out_path)
+            logger.info(
+                "regenerated datamatrix png from cache: %s (packet=%d, blob=%d)",
+                self.out_path,
+                sizes["packet_size"],
+                sizes["blob_size"],
+            )
+        except Exception as exc:
+            logger.error("failed to regenerate datamatrix png: %s", exc)
 
     def refresh_image(self) -> None:
+        self._refresh_png_if_cache_updated()
         try:
             image = Image.open(self.out_path)
             image = image.resize((WINDOW_WIDTH, WINDOW_HEIGHT), Image.NEAREST)
@@ -137,6 +172,7 @@ def main() -> int:
         margin_right_px=args.margin_right_px,
         margin_top_px=args.margin_top_px,
     )
+    app.set_cache_path(Path(args.cache))
     app.run()
     return 0
 
