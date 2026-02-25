@@ -93,7 +93,9 @@ def main() -> int:
             image_path = captures_dir / f"{ts}.png"
 
             record = {
-                "timestamp_ms": None,
+                "timestamp_ms": decoded_at_ms,
+                "epoch_ms": None,
+                "ts": None,
                 "packet_id": None,
                 "decoded_at_ms": decoded_at_ms,
                 "source_image": str(image_path),
@@ -113,7 +115,10 @@ def main() -> int:
                 image_bgr = image_rgb[:, :, ::-1]
                 payload = dm_datamatrix.decode_payload_from_bgr_image(image_bgr)
 
-                record["timestamp_ms"] = payload.get("timestamp_ms")
+                dm_epoch_ms = payload.get("epoch_ms") if payload.get("epoch_ms") is not None else payload.get("timestamp_ms")
+                record["epoch_ms"] = dm_epoch_ms
+                record["timestamp_ms"] = dm_epoch_ms if dm_epoch_ms is not None else decoded_at_ms
+                record["ts"] = payload.get("ts")
                 record["packet_id"] = payload.get("packet_id")
                 record["beds"] = payload.get("beds")
                 record["decode_ok"] = True

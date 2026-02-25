@@ -5,7 +5,7 @@ import json
 import math
 import re
 from bisect import bisect_left
-from collections import deque
+from collections import Counter, deque
 from datetime import datetime
 from pathlib import Path
 from statistics import median
@@ -273,7 +273,13 @@ def extract_decoded_value(bed_data: dict[str, Any], field: str) -> Any:
     return None
 
 
-def pick_truth(decoded_packet_id: int | None, decoded_timestamp_ms: int | None, truth_rows: list[dict[str, Any]], tolerance_sec: float) -> tuple[dict[str, Any] | None, float | None, str]:
+def pick_truth(
+    decoded_packet_id: int | None,
+    decoded_timestamp_ms: int | None,
+    truth_rows: list[dict[str, Any]],
+    tolerance_sec: float,
+    decoded_time_source: str,
+) -> tuple[dict[str, Any] | None, float | None, str]:
     if decoded_packet_id is not None:
         for row in truth_rows:
             if normalize_packet_id(row.get("packet_id")) == decoded_packet_id:
@@ -295,11 +301,14 @@ def pick_truth(decoded_packet_id: int | None, decoded_timestamp_ms: int | None, 
         candidates.append((abs(truth_ts[idx - 1] - target), idx - 1))
     if not candidates:
         return None, None, "none"
+
     _, best_i = min(candidates, key=lambda x: x[0])
     delta = truth_ts[best_i] - target
     if abs(delta) > tolerance_sec * 1000.0:
         return None, None, "none"
-    return truth_rows[best_i], delta, "timestamp"
+
+    matched_by = "epoch_ms" if decoded_time_source == "dm_epoch_ms" else "fallback_time"
+    return truth_rows[best_i], delta, matched_by
 
 
 def percentile(values: list[float], p: float) -> float | None:
@@ -385,6 +394,7 @@ def main() -> None:
     decoded_record_count = len(decoded_rows)
     decode_success_record_count = crc_fail_record_count = truth_missing_record_count = 0
     delta_t_values: list[float] = []
+    matched_by_counter: Counter[str] = Counter()
     evaluated_on_success = matched_on_success = 0
     abs_errors_on_success: list[float] = []
     per_field: dict[str, dict[str, Any]] = {f: {"count": 0, "evaluated": 0, "matched": 0, "within_tol_matched": 0, "abs_errors": []} for f in VITAL_ORDER}
@@ -401,20 +411,37 @@ def main() -> None:
                 crc_fail_record_count += 1
 
             decoded_beds = rec.get("beds") if isinstance(rec.get("beds"), dict) else {}
-            decoded_timestamp_ms = normalize_epoch_ms(rec.get("timestamp_ms"))
             decoded_packet_id = normalize_packet_id(rec.get("packet_id"))
+
+            decoded_timestamp_ms = normalize_epoch_ms(rec.get("epoch_ms"))
+            decoded_time_source = "dm_epoch_ms" if decoded_timestamp_ms is not None else "none"
+            if decoded_timestamp_ms is None:
+                decoded_timestamp_ms = normalize_epoch_ms(rec.get("timestamp_ms"))
+                if decoded_timestamp_ms is not None:
+                    decoded_time_source = "dm_epoch_ms"
             if decoded_timestamp_ms is None:
                 decoded_timestamp_ms = normalize_epoch_ms(rec.get("decoded_at_ms"))
+                if decoded_timestamp_ms is not None:
+                    decoded_time_source = "decoded_at_ms"
             if decoded_timestamp_ms is None:
                 dts = parse_timestamp(rec.get("timestamp")) or infer_timestamp_from_filename(rec.get("source_image") or rec.get("image_path"))
                 if dts:
                     decoded_timestamp_ms = int(round(dts.timestamp() * 1000))
+                    decoded_time_source = "record_timestamp"
 
-            nearest_truth, delta_t, matched_by = pick_truth(decoded_packet_id, decoded_timestamp_ms, truth_rows, args.tolerance_sec)
+            nearest_truth, delta_t, matched_by = pick_truth(
+                decoded_packet_id,
+                decoded_timestamp_ms,
+                truth_rows,
+                args.tolerance_sec,
+                decoded_time_source,
+            )
             if nearest_truth is None:
                 truth_missing_record_count += 1
-            elif delta_t is not None:
-                delta_t_values.append(delta_t)
+            else:
+                matched_by_counter[matched_by] += 1
+                if delta_t is not None:
+                    delta_t_values.append(delta_t)
                 if args.debug_one and not debug_done:
                     print_debug_one(nearest_truth, decoded_beds)
                     debug_done = True
@@ -542,6 +569,15 @@ def main() -> None:
         "invalid_rate": (invalid_count / total_expected) if total_expected else None,
         "truth_missing_records": truth_missing_record_count,
         "truth_missing_rate": (truth_missing_record_count / decoded_record_count) if decoded_record_count else None,
+        "matched_by": dict(matched_by_counter),
+        "delta_ms": {
+            "mean": safe_mean(delta_t_values),
+            "median": safe_median(delta_t_values),
+            "p90": percentile(delta_t_values, 90.0),
+            "min": min(delta_t_values) if delta_t_values else None,
+            "max": max(delta_t_values) if delta_t_values else None,
+            "count": len(delta_t_values),
+        },
         "delta_t_ms": {"mean": safe_mean(delta_t_values), "median": safe_median(delta_t_values), "p90": percentile(delta_t_values, 90.0), "count": len(delta_t_values)},
         "per_field": per_field_summary,
     }
