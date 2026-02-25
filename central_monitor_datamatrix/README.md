@@ -23,7 +23,7 @@ HL7受信で得たベッド別vitalsを、PHIを含まないDataMatrixペイロ�
 - packet構造:
   - header: `magic(4)=CMDM`, `version(1)=1`, `beds_count(1)=6`, `params_count(1)=20`, `reserved(1)=0`, `timestamp_ms(int64)`
   - body: 各ベッドごとに `bed_present(uint8)` + 各パラメータ `present(uint8)` + `value(int32)`
-- 浮動小数点が必要な項目は `SCALE_MAP` で量子化（例: `TEMP` は10倍）
+- 浮動小数点が必要な項目は `SCALE_MAP` で量子化（例: `TSKIN` / `TRECT` は10倍）
 
 ## zint.exe 設置
 

@@ -342,6 +342,22 @@ def extract_decoded_value(bed_data: dict[str, Any], field: str) -> Any:
     return field_obj.get("value")
 
 
+def collect_decoded_field_names(decoded_beds: dict[str, Any]) -> set[str]:
+    names: set[str] = set()
+    if not isinstance(decoded_beds, dict):
+        return names
+    for bed_data in decoded_beds.values():
+        if not isinstance(bed_data, dict):
+            continue
+        for key in bed_data.keys():
+            if key != "vitals":
+                names.add(str(key))
+        vitals = bed_data.get("vitals")
+        if isinstance(vitals, dict):
+            names.update(str(key) for key in vitals.keys())
+    return names
+
+
 def percentile(values: list[float], p: float) -> float | None:
     if not values:
         return None
@@ -434,6 +450,10 @@ def main() -> None:
         for field in VITAL_ORDER
     }
 
+
+    decoded_fields_seen: set[str] = set()
+    records_with_vital_order_fields = 0
+
     with out_path.open("w", encoding="utf-8") as out_f:
         for rec_idx, rec in enumerate(decoded_rows, 1):
             decode_ok = bool(rec.get("decode_ok"))
@@ -473,6 +493,11 @@ def main() -> None:
                     decoded_beds = beds_direct
             if not isinstance(decoded_beds, dict):
                 decoded_beds = {}
+
+            decoded_fields = collect_decoded_field_names(decoded_beds)
+            decoded_fields_seen.update(decoded_fields)
+            if decoded_fields.intersection(VITAL_ORDER):
+                records_with_vital_order_fields += 1
 
             for bed in BED_IDS:
                 bed_decoded = decoded_beds.get(bed, {}) if isinstance(decoded_beds.get(bed, {}), dict) else {}
@@ -612,10 +637,21 @@ def main() -> None:
             "count": len(delta_t_values),
         },
         "per_field": per_field_summary,
+        "decoded_field_diagnostics": {
+            "records_with_vital_order_fields": records_with_vital_order_fields,
+            "decoded_fields_seen": sorted(decoded_fields_seen),
+            "vital_order_fields_seen": sorted(decoded_fields_seen.intersection(VITAL_ORDER)),
+        },
     }
 
     with summary_path.open("w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
+
+    if evaluated_count == 0:
+        print(
+            "[WARN] No fields matched VITAL_ORDER. Check field naming. "
+            f"decoded_fields_seen={sorted(decoded_fields_seen)}"
+        )
 
     print(f"[INFO] Detailed results written: {out_path}")
     print(f"[INFO] Summary written: {summary_path}")
