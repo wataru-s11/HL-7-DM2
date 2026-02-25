@@ -208,9 +208,9 @@ class DMDisplayApp:
     def refresh_image(self) -> None:
         self._refresh_png_if_cache_updated()
         try:
-            image = Image.open(self.out_path)
-            image = image.resize((WINDOW_WIDTH, WINDOW_HEIGHT), Image.NEAREST)
-            self.photo = ImageTk.PhotoImage(image)
+            with Image.open(self.out_path) as image:
+                resized_image = image.resize((WINDOW_WIDTH, WINDOW_HEIGHT), Image.NEAREST)
+            self.photo = ImageTk.PhotoImage(resized_image)
             self.image_label.configure(image=self.photo)
         except FileNotFoundError:
             logger.warning("output image not found: %s", self.out_path)
