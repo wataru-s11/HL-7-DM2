@@ -303,7 +303,7 @@ def pick_truth(
     if abs(delta) > tolerance_sec * 1000.0:
         return None, None, "none"
 
-    matched_by = "epoch_ms" if decoded_time_source == "dm_epoch_ms" else "fallback_time"
+    matched_by = "epoch_ms" if decoded_time_source in {"dm_epoch_ms", "cache_epoch_ms", "timestamp_ms"} else "fallback_time"
     return truth_rows[best_i], delta, matched_by
 
 
@@ -408,14 +408,20 @@ def main() -> None:
                 crc_fail_record_count += 1
 
             decoded_beds = rec.get("beds") if isinstance(rec.get("beds"), dict) else {}
-            decoded_packet_id = normalize_packet_id(rec.get("packet_id"))
+            decoded_packet_id = normalize_packet_id(rec.get("source_packet_id"))
+            if decoded_packet_id is None:
+                decoded_packet_id = normalize_packet_id(rec.get("packet_id"))
 
-            decoded_timestamp_ms = normalize_epoch_ms(rec.get("epoch_ms"))
-            decoded_time_source = "dm_epoch_ms" if decoded_timestamp_ms is not None else "none"
+            decoded_timestamp_ms = normalize_epoch_ms(rec.get("cache_epoch_ms"))
+            decoded_time_source = "cache_epoch_ms" if decoded_timestamp_ms is not None else "none"
+            if decoded_timestamp_ms is None:
+                decoded_timestamp_ms = normalize_epoch_ms(rec.get("epoch_ms"))
+                if decoded_timestamp_ms is not None:
+                    decoded_time_source = "dm_epoch_ms"
             if decoded_timestamp_ms is None:
                 decoded_timestamp_ms = normalize_epoch_ms(rec.get("timestamp_ms"))
                 if decoded_timestamp_ms is not None:
-                    decoded_time_source = "dm_epoch_ms"
+                    decoded_time_source = "timestamp_ms"
             if decoded_timestamp_ms is None:
                 decoded_timestamp_ms = normalize_epoch_ms(rec.get("decoded_at_ms"))
                 if decoded_timestamp_ms is not None:
@@ -518,6 +524,9 @@ def main() -> None:
                         "decoded_at_ms": normalize_epoch_ms(rec.get("decoded_at_ms")),
                         "timestamp_ms": decoded_timestamp_ms,
                         "packet_id": decoded_packet_id,
+                        "cache_epoch_ms": normalize_epoch_ms(rec.get("cache_epoch_ms")),
+                        "source_packet_id": normalize_packet_id(rec.get("source_packet_id")),
+                        "source": rec.get("source"),
                         "truth_packet_id": normalize_packet_id(nearest_truth.get("packet_id")) if nearest_truth else None,
                         "decode_ok": decode_ok,
                         "crc_ok": crc_ok,
