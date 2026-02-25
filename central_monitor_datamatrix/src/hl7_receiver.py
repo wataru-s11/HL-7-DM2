@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import threading
 from dataclasses import dataclass, field
@@ -42,6 +43,15 @@ def _extract_mllp_payload(data: bytes) -> str:
     return data[start + 1 : end].decode("utf-8", errors="ignore")
 
 
+def _write_cache_atomic(cache_path: Path, payload: Dict[str, Any], *, indent: int | None = None) -> None:
+    tmp_path = cache_path.with_name(f"{cache_path.name}.tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=indent)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, cache_path)
+
+
 def _handle_client(conn: socket.socket, aggregator: BedDataAggregator, cache_path: Path) -> None:
     try:
         data = conn.recv(65535)
@@ -50,7 +60,7 @@ def _handle_client(conn: socket.socket, aggregator: BedDataAggregator, cache_pat
             return
         parsed = parse_hl7_message(message)
         aggregator.update_from_parsed(parsed)
-        cache_path.write_text(json.dumps(aggregator.snapshot(), ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_cache_atomic(cache_path, aggregator.snapshot(), indent=2)
         conn.sendall(SB + b"MSA|AA|OK" + EB_CR)
     finally:
         conn.close()
@@ -59,7 +69,7 @@ def _handle_client(conn: socket.socket, aggregator: BedDataAggregator, cache_pat
 def serve(host: str, port: int, cache_path: Path) -> None:
     aggregator = BedDataAggregator()
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(json.dumps(aggregator.snapshot()), encoding="utf-8")
+    _write_cache_atomic(cache_path, aggregator.snapshot())
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
