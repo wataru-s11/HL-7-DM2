@@ -35,7 +35,7 @@ SCALE_MAP: dict[str, int] = {
     "TRECT": 10,
 }
 
-_HEADER_STRUCT = struct.Struct("<4sBBBBq")
+_HEADER_STRUCT = struct.Struct("<4sBBBBqi")
 _CELL_STRUCT = struct.Struct("<Bi")
 _ALLOWED_VITAL_FIELDS = ("value", "unit", "flag", "status")
 schema_version = VERSION
@@ -141,7 +141,10 @@ def make_payload(monitor_cache: dict[str, Any], seq: int) -> dict[str, Any]:
 
     return {
         "v": schema_version,
+        "schema_version": schema_version,
         "ts": datetime.now(timezone.utc).isoformat(),
+        "timestamp_ms": _to_epoch_ms(monitor_cache.get("epoch_ms") or monitor_cache.get("ts") or monitor_cache.get("timestamp")),
+        "packet_id": int(monitor_cache.get("packet_id") or 0),
         "seq": seq,
         "beds": beds,
     }
@@ -170,8 +173,13 @@ def build_packet(monitor_cache: dict[str, Any], beds: list[str] | None = None, p
     if len(beds) > 255 or len(params) > 255:
         raise PacketError("beds/params count must be <= 255")
 
-    timestamp_ms = _to_epoch_ms(monitor_cache.get("ts") or monitor_cache.get("timestamp"))
-    header = _HEADER_STRUCT.pack(MAGIC, VERSION, len(beds), len(params), 0, timestamp_ms)
+    timestamp_ms = _to_epoch_ms(monitor_cache.get("epoch_ms") or monitor_cache.get("ts") or monitor_cache.get("timestamp"))
+    packet_id_raw = monitor_cache.get("packet_id")
+    try:
+        packet_id = int(packet_id_raw)
+    except (TypeError, ValueError):
+        packet_id = 0
+    header = _HEADER_STRUCT.pack(MAGIC, VERSION, len(beds), len(params), 0, timestamp_ms, packet_id)
 
     body = bytearray()
     cache_beds = monitor_cache.get("beds") if isinstance(monitor_cache.get("beds"), dict) else {}
@@ -200,7 +208,7 @@ def parse_packet(packet_bytes: bytes, beds: list[str] | None = None, params: lis
     if len(packet_bytes) < _HEADER_STRUCT.size:
         raise PacketError("packet too small")
 
-    magic, version, beds_count, params_count, _reserved, timestamp_ms = _HEADER_STRUCT.unpack_from(packet_bytes, 0)
+    magic, version, beds_count, params_count, _reserved, timestamp_ms, packet_id = _HEADER_STRUCT.unpack_from(packet_bytes, 0)
     if magic != MAGIC:
         raise PacketError(f"invalid magic: {magic!r}")
     if version != VERSION:
@@ -235,8 +243,10 @@ def parse_packet(packet_bytes: bytes, beds: list[str] | None = None, params: lis
     return {
         "magic": MAGIC.decode("ascii"),
         "version": version,
+        "schema_version": version,
         "beds_count": beds_count,
         "params_count": params_count,
         "timestamp_ms": timestamp_ms,
+        "packet_id": packet_id,
         "beds": out_beds,
     }
