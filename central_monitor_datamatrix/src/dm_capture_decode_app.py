@@ -104,6 +104,9 @@ def main() -> int:
                 "epoch_ms": None,
                 "ts": None,
                 "packet_id": None,
+                "cache_epoch_ms": None,
+                "source_packet_id": None,
+                "source": None,
                 "decoded_at_ms": decoded_at_ms,
                 "source_image": str(image_path),
                 "decode_ok": False,
@@ -127,10 +130,13 @@ def main() -> int:
                 record["timestamp_ms"] = dm_epoch_ms if dm_epoch_ms is not None else decoded_at_ms
                 record["ts"] = payload.get("ts")
                 record["packet_id"] = payload.get("packet_id")
+                record["cache_epoch_ms"] = payload.get("epoch_ms")
+                record["source_packet_id"] = payload.get("packet_id")
+                record["source"] = payload.get("source")
                 record["beds"] = payload.get("beds")
                 record["decode_ok"] = True
                 record["crc_ok"] = True
-                logger.info("decoded ok: %s", image_path)
+                logger.info("decoded ok: %s cache_epoch_ms=%s source_packet_id=%s source=%s", image_path, record.get("cache_epoch_ms"), record.get("source_packet_id"), record.get("source"))
             except Exception as exc:
                 record["error"] = str(exc)
                 logger.warning("decode failed: %s (%s)", image_path, exc)

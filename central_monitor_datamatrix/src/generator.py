@@ -5,13 +5,13 @@ import json
 import logging
 import os
 import random
-import secrets
-import threading
 import time
+import atexit
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import cache_io
 from hl7_sender import send_mllp_message
 
 logger = logging.getLogger(__name__)
@@ -41,8 +41,7 @@ GENERATOR_VITAL_SPECS = [
 
 
 JST = timezone(timedelta(hours=9))
-LOCK_TIMEOUT_SEC = 2.0
-LOCK_STALE_SEC = 10.0
+WRITER_LOCK_TIMEOUT_SEC = 2.0
 
 
 def _to_bool(value: str | bool) -> bool:
@@ -113,7 +112,13 @@ def load_packet_id(state_path: Path) -> int:
     if not state_path.exists():
         return 0
     try:
-        return int(state_path.read_text(encoding="utf-8").strip() or "0")
+        raw = state_path.read_text(encoding="utf-8").strip()
+        if not raw:
+            return 0
+        if raw.startswith("{"):
+            payload = json.loads(raw)
+            return int(payload.get("packet_id", 0)) if isinstance(payload, dict) else 0
+        return int(raw)
     except Exception:
         logger.warning("failed to load packet_id state from %s; reset to 0", state_path)
         return 0
@@ -121,88 +126,26 @@ def load_packet_id(state_path: Path) -> int:
 
 def save_packet_id(state_path: Path, value: int) -> None:
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_text_atomic_with_retry(state_path, str(int(value)))
-
-
-def _acquire_lock(lock_path: Path, timeout_sec: float = LOCK_TIMEOUT_SEC, stale_sec: float = LOCK_STALE_SEC) -> int:
-    deadline = time.time() + timeout_sec
-    while True:
-        try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, f"pid={os.getpid()} tid={threading.get_ident()} ts={time.time():.6f}\n".encode("utf-8"))
-            return fd
-        except FileExistsError:
-            try:
-                age_sec = time.time() - lock_path.stat().st_mtime
-                if age_sec > stale_sec:
-                    logger.warning("lock file is stale; removing and retrying: %s age=%.2fs", lock_path, age_sec)
-                    lock_path.unlink(missing_ok=True)
-                    continue
-            except FileNotFoundError:
-                continue
-            if time.time() >= deadline:
-                raise TimeoutError(f"timed out waiting for lock file: {lock_path}")
-            time.sleep(0.05)
-
-
-def _release_lock(lock_path: Path, lock_fd: int) -> None:
-    try:
-        os.close(lock_fd)
-    finally:
-        lock_path.unlink(missing_ok=True)
-
-
-def _write_text_atomic_with_retry(path: Path, text: str, retries: int = 40, base_delay_sec: float = 0.05) -> None:
-    lock_path = path.with_name(f"{path.name}.lock")
-    lock_fd = _acquire_lock(lock_path)
-    try:
-        last_error: PermissionError | None = None
-        for attempt in range(1, retries + 1):
-            token = secrets.token_hex(4)
-            tmp_path = path.with_name(
-                f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{token}"
-            )
-            try:
-                with tmp_path.open("w", encoding="utf-8") as f:
-                    f.write(text)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(tmp_path, path)
-                return
-            except PermissionError as exc:
-                last_error = exc
-                logger.warning(
-                    "atomic replace retry due to PermissionError: target=%s attempt=%d/%d error=%s",
-                    path,
-                    attempt,
-                    retries,
-                    exc,
-                )
-                tmp_path.unlink(missing_ok=True)
-                if attempt < retries:
-                    time.sleep(base_delay_sec)
-            except Exception:
-                tmp_path.unlink(missing_ok=True)
-                raise
-
-        logger.warning("atomic replace retries exhausted; falling back to direct write: target=%s", path)
-        try:
-            with path.open("w", encoding="utf-8") as f:
-                f.write(text)
-                f.flush()
-                os.fsync(f.fileno())
-        except Exception:
-            if last_error is not None:
-                logger.error("direct write fallback failed after atomic retries: target=%s", path)
-                raise last_error
-            raise
-    finally:
-        _release_lock(lock_path, lock_fd)
+    cache_io.atomic_write_json(state_path, {"packet_id": int(value)})
 
 
 def write_cache_snapshot(cache_path: Path, payload: dict[str, Any]) -> None:
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_text_atomic_with_retry(cache_path, json.dumps(payload, ensure_ascii=False, indent=2))
+    cache_io.atomic_write_json(cache_path, payload)
+
+
+def claim_single_writer(cache_path: Path, writer_name: str) -> tuple[Path, int]:
+    writer_lock_path = cache_path.with_name(f"{cache_path.name}.writer.lock")
+    fd = cache_io.acquire_lock(writer_lock_path, timeout_sec=WRITER_LOCK_TIMEOUT_SEC)
+    os.ftruncate(fd, 0)
+    os.write(fd, f"writer={writer_name} pid={os.getpid()}\n".encode("utf-8"))
+    return writer_lock_path, fd
+
+
+def _release_claim(lock_path: Path, fd: int) -> None:
+    try:
+        os.close(fd)
+    finally:
+        lock_path.unlink(missing_ok=True)
 
 
 def default_truth_path(base_dir: Path, epoch_ms: int) -> Path:
@@ -211,6 +154,12 @@ def default_truth_path(base_dir: Path, epoch_ms: int) -> Path:
 
 
 def main() -> None:
+    # NOTE: cacheは単一writer運用が前提です。
+    # - シミュレーション時: generator.py のみが cache writer
+    # - 実HL7時: hl7_receiver.py のみが cache writer
+    # PowerShell例:
+    #   generatorのみ: python generator.py --cache-out generator_cache.json -> python dm_display_app.py --cache generator_cache.json
+    #   receiverのみ : python hl7_receiver.py --cache receiver_cache.json -> python dm_display_app.py --cache receiver_cache.json
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=2575)
@@ -249,11 +198,13 @@ def main() -> None:
     cache_path = Path(args.cache_out)
     packet_state_path = Path(args.packet_id_state) if args.packet_id_state else cache_path.with_suffix(".packet_id")
     packet_id = load_packet_id(packet_state_path)
+    claim_lock_path, claim_fd = claim_single_writer(cache_path, "generator")
+    atexit.register(_release_claim, claim_lock_path, claim_fd)
 
     while args.count < 0 or loop < args.count:
-        cycle_ts = datetime.now(JST)
-        cycle_iso = cycle_ts.isoformat(timespec="milliseconds")
-        cycle_epoch_ms = int(cycle_ts.timestamp() * 1000)
+        cycle_now_ms = int(datetime.now(JST).timestamp() * 1000)
+        cycle_iso = datetime.fromtimestamp(cycle_now_ms / 1000.0, tz=JST).isoformat(timespec="milliseconds")
+        cycle_epoch_ms = cycle_now_ms
         cycle_beds: dict[str, dict[str, Any]] = {}
         hl7_messages: list[str] = []
 

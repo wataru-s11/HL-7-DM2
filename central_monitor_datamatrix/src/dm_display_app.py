@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import time
 import tkinter as tk
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,88 +20,30 @@ WINDOW_WIDTH = 420
 WINDOW_HEIGHT = 420
 
 
-def _validate_cache_metadata(cache: dict[str, Any]) -> dict[str, Any]:
+def _normalize_cache_metadata(cache: dict[str, Any], fallback_epoch_ms: int, fallback_packet_id: int) -> dict[str, Any]:
+    cache = dict(cache)
+
     epoch_ms = cache.get("epoch_ms")
+    if isinstance(epoch_ms, bool) or not isinstance(epoch_ms, int):
+        cache["epoch_ms"] = fallback_epoch_ms
+
     packet_id = cache.get("packet_id")
+    if isinstance(packet_id, bool) or not isinstance(packet_id, int):
+        cache["packet_id"] = fallback_packet_id
+
     ts = cache.get("ts")
-
-    if isinstance(epoch_ms, bool):
-        raise ValueError("cache field epoch_ms must be int, got bool")
-    if not isinstance(epoch_ms, int):
-        raise ValueError(f"cache field epoch_ms is required as int (got={type(epoch_ms).__name__})")
-
-    if isinstance(packet_id, bool):
-        raise ValueError("cache field packet_id must be int, got bool")
-    if not isinstance(packet_id, int):
-        raise ValueError(f"cache field packet_id is required as int (got={type(packet_id).__name__})")
-
     if not isinstance(ts, str) or not ts.strip():
-        cache = dict(cache)
-        cache["ts"] = datetime.fromtimestamp(epoch_ms / 1000.0, tz=timezone.utc).isoformat(timespec="milliseconds")
+        cache["ts"] = datetime.fromtimestamp(cache["epoch_ms"] / 1000.0, tz=timezone.utc).isoformat(timespec="milliseconds")
 
     source = cache.get("source")
     if not isinstance(source, str) or not source.strip():
-        cache = dict(cache)
         cache["source"] = "unknown"
 
     beds = cache.get("beds")
     if not isinstance(beds, dict):
-        cache = dict(cache)
         cache["beds"] = {}
 
     return cache
-
-
-def _resolve_snapshot_path(out_path: Path, epoch_ms: int) -> Path:
-    day = datetime.fromtimestamp(epoch_ms / 1000.0, tz=timezone.utc).strftime("%Y%m%d")
-    return out_path.parent / day / "cache_snapshots.jsonl"
-
-
-def _read_last_packet_id(snapshot_path: Path) -> int | None:
-    if not snapshot_path.exists():
-        return None
-    try:
-        with snapshot_path.open("r", encoding="utf-8") as f:
-            last_line = ""
-            for line in f:
-                if line.strip():
-                    last_line = line
-        if not last_line:
-            return None
-        payload = json.loads(last_line)
-        raw = payload.get("packet_id")
-        return int(raw) if raw is not None else None
-    except Exception:
-        logger.warning("failed to read last packet_id from %s", snapshot_path)
-        return None
-
-
-def _append_cache_snapshot(snapshot_path: Path, cache: dict[str, Any]) -> bool:
-    packet_id = cache.get("packet_id")
-    epoch_ms = cache.get("epoch_ms")
-    ts = cache.get("ts")
-
-    if not isinstance(packet_id, int) or not isinstance(epoch_ms, int):
-        return False
-
-    last_packet_id = _read_last_packet_id(snapshot_path)
-    if last_packet_id == packet_id:
-        return False
-
-    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-    row = {
-        "epoch_ms": epoch_ms,
-        "packet_id": packet_id,
-        "ts": ts,
-        "beds": cache.get("beds", {}),
-    }
-    try:
-        with snapshot_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-        return True
-    except OSError as exc:
-        logger.warning("failed to append cache snapshot: %s", exc)
-        return False
 
 
 class DMDisplayApp:
@@ -160,6 +103,9 @@ class DMDisplayApp:
         self.photo = None
         self.cache_path: Path | None = None
         self.last_seen_packet_epoch: tuple[int, int] | None = None
+        self.last_cache_mtime_ns: int | None = None
+        self.no_update_count = 0
+        self.read_failures = 0
 
     def set_cache_path(self, cache_path: Path) -> None:
         self.cache_path = cache_path
@@ -169,41 +115,54 @@ class DMDisplayApp:
             return
 
         try:
+            stat = self.cache_path.stat()
+            current_mtime_ns = stat.st_mtime_ns
+            if self.last_cache_mtime_ns is not None and current_mtime_ns == self.last_cache_mtime_ns:
+                self.no_update_count += 1
+                if self.debug and self.no_update_count % 20 == 0:
+                    logger.info("debug: cache mtime unchanged count=%d mtime_ns=%d path=%s", self.no_update_count, current_mtime_ns, self.cache_path)
+                return
+
             cache, read_attempt = dm_datamatrix.load_cache_with_retry(self.cache_path)
-            cache = _validate_cache_metadata(cache)
+            self.last_cache_mtime_ns = current_mtime_ns
+            self.no_update_count = 0
+            self.read_failures = 0
+
+            fallback_epoch_ms = int(time.time() * 1000)
+            fallback_packet_id = self.last_seen_packet_epoch[0] + 1 if self.last_seen_packet_epoch else 1
+            cache = _normalize_cache_metadata(cache, fallback_epoch_ms=fallback_epoch_ms, fallback_packet_id=fallback_packet_id)
             current_packet_epoch = (int(cache["packet_id"]), int(cache["epoch_ms"]))
             if self.last_seen_packet_epoch == current_packet_epoch:
+                if self.debug:
+                    logger.info("debug: cache metadata unchanged packet_epoch=%s", current_packet_epoch)
                 return
 
             sizes = dm_datamatrix.generate_datamatrix_png_from_cache_data(cache, self.out_path)
-            snapshot_path = _resolve_snapshot_path(self.out_path, int(cache["epoch_ms"]))
-            appended = _append_cache_snapshot(snapshot_path, cache)
             self.last_seen_packet_epoch = current_packet_epoch
 
             logger.info(
-                "regenerated datamatrix png from cache: %s (packet=%d, cache_packet_id=%d, epoch_ms=%d, blob=%d, read_attempt=%d, snapshot_appended=%s)",
+                "regenerated datamatrix png from cache(read-only): %s (packet=%d, cache_packet_id=%d, epoch_ms=%d, blob=%d, read_attempt=%d)",
                 self.out_path,
                 sizes["packet_size"],
                 current_packet_epoch[0],
                 current_packet_epoch[1],
                 sizes["blob_size"],
                 read_attempt,
-                appended,
             )
+        except FileNotFoundError:
             if self.debug:
-                logger.info(
-                    "debug: dm payload key epoch_ms=%s packet_id=%s",
-                    cache.get("epoch_ms"),
-                    cache.get("packet_id"),
-                )
+                logger.info("debug: cache file not found yet: %s", self.cache_path)
         except (json.JSONDecodeError, OSError) as exc:
+            self.read_failures += 1
             logger.warning(
-                "cache read retry exhausted after dm_datamatrix.load_cache_with_retry(retries=3): cache=%s error=%s",
+                "cache read retry exhausted after dm_datamatrix.load_cache_with_retry(retries=3): cache=%s error=%s failures=%d",
                 self.cache_path,
                 exc,
+                self.read_failures,
             )
         except Exception as exc:
-            logger.warning("failed to regenerate datamatrix png; keeping previous png: %s", exc)
+            self.read_failures += 1
+            logger.warning("failed to regenerate datamatrix png; keeping previous png: %s (failures=%d)", exc, self.read_failures)
 
     def refresh_image(self) -> None:
         self._refresh_png_if_cache_updated()
