@@ -79,7 +79,7 @@ class DMDisplayApp:
     def __init__(
         self,
         out_path: Path,
-        interval_ms: int,
+        poll_ms: int,
         monitor_index: int,
         margin_right_px: int,
         margin_top_px: int,
@@ -87,7 +87,7 @@ class DMDisplayApp:
         debug: bool = False,
     ) -> None:
         self.out_path = out_path
-        self.interval_ms = interval_ms
+        self.poll_ms = poll_ms
         self.monitor_index = monitor_index
         self.margin_right_px = margin_right_px
         self.margin_top_px = margin_top_px
@@ -133,9 +133,7 @@ class DMDisplayApp:
         self.image_label.pack(fill=tk.BOTH, expand=True)
         self.photo = None
         self.cache_path: Path | None = None
-        self.last_seen_epoch_ms: int | None = None
         self.last_seen_packet_id: int | None = None
-        self.last_seen_mtime_ns: int | None = None
         self.warned_missing_packet_id = False
         self.no_update_count = 0
         self.read_failures = 0
@@ -144,24 +142,6 @@ class DMDisplayApp:
     def set_cache_path(self, cache_path: Path) -> None:
         self.cache_path = cache_path
 
-    def _is_cache_updated(self, current_epoch_ms: int | None, current_packet_id: int | None, current_mtime_ns: int) -> bool:
-        if self.cache_type == CacheUpdateMode.RECEIVER:
-            return (
-                self.last_seen_mtime_ns != current_mtime_ns
-                or self.last_seen_epoch_ms != current_epoch_ms
-            )
-
-        if current_packet_id is not None and self.last_seen_packet_id is not None:
-            return (
-                self.last_seen_packet_id != current_packet_id
-                or self.last_seen_epoch_ms != current_epoch_ms
-            )
-
-        return (
-            self.last_seen_epoch_ms != current_epoch_ms
-            or self.last_seen_mtime_ns != current_mtime_ns
-        )
-
     def _refresh_png_if_cache_updated(self) -> None:
         if self.cache_path is None:
             return
@@ -169,56 +149,49 @@ class DMDisplayApp:
         try:
             self.tick_count += 1
             cache, read_attempt = dm_datamatrix.load_cache_with_retry(self.cache_path)
-            mtime_ns = self.cache_path.stat().st_mtime_ns
             self.read_failures = 0
 
             fallback_epoch_ms = int(time.time() * 1000)
             cache = _ensure_cache_metadata(cache, fallback_epoch_ms=fallback_epoch_ms)
 
-            current_epoch_ms = _to_epoch_ms(cache.get("epoch_ms"))
             current_packet_id = cache.get("packet_id") if isinstance(cache.get("packet_id"), int) else None
 
             if current_packet_id is None and not self.warned_missing_packet_id:
                 self.warned_missing_packet_id = True
                 logger.warning(
-                    "cache has no packet_id. Falling back to epoch_ms/mtime update detection. cache=%s cache_type=%s",
+                    "cache has no packet_id. regeneration is skipped until packet_id appears: cache=%s cache_type=%s",
                     self.cache_path,
                     self.cache_type,
                 )
+                return
 
-            if not self._is_cache_updated(current_epoch_ms, current_packet_id, mtime_ns):
+            if self.last_seen_packet_id == current_packet_id:
                 self.no_update_count += 1
                 if self.tick_count % 10 == 0:
                     logger.info(
-                        "heartbeat: tick=%d unchanged_count=%d last_epoch_ms=%s last_packet_id=%s read_attempt=%d",
+                        "heartbeat: tick=%d unchanged_count=%d last_packet_id=%s read_attempt=%d",
                         self.tick_count,
                         self.no_update_count,
-                        self.last_seen_epoch_ms,
                         self.last_seen_packet_id,
                         read_attempt,
                     )
                 if self.debug:
                     logger.debug(
-                        "packet_idが変わらなかったので再生成しなかった: epoch_ms=%s packet_id=%s mtime_ns=%s cache_type=%s",
-                        current_epoch_ms,
+                        "packet_idが変わらなかったので再生成しなかった: packet_id=%s cache_type=%s",
                         current_packet_id,
-                        mtime_ns,
                         self.cache_type,
                     )
                 return
 
             sizes = dm_datamatrix.generate_datamatrix_png_from_cache_data(cache, self.out_path)
-            self.last_seen_epoch_ms = current_epoch_ms
             self.last_seen_packet_id = current_packet_id
-            self.last_seen_mtime_ns = mtime_ns
             self.no_update_count = 0
 
             logger.info(
-                "regenerated datamatrix png from cache(read-only): %s (packet=%d, cache_packet_id=%s, epoch_ms=%s, blob=%d, read_attempt=%d, cache_type=%s)",
+                "regenerated datamatrix png from cache(read-only): %s (packet=%d, cache_packet_id=%s, blob=%d, read_attempt=%d, cache_type=%s)",
                 self.out_path,
                 sizes["packet_size"],
                 current_packet_id,
-                current_epoch_ms,
                 sizes["blob_size"],
                 read_attempt,
                 self.cache_type,
@@ -251,7 +224,7 @@ class DMDisplayApp:
         except Exception as exc:
             logger.error("failed to load image %s: %s", self.out_path, exc)
 
-        self.root.after(self.interval_ms, self.refresh_image)
+        self.root.after(self.poll_ms, self.refresh_image)
 
     def run(self) -> None:
         self.refresh_image()
@@ -272,7 +245,8 @@ def parse_args() -> argparse.Namespace:
         help="Cache update strategy: generator=packet_id+epoch_ms, receiver=mtime/epoch_ms fallback",
     )
     parser.add_argument("--out", default="dataset/dm_latest.png", help="Output PNG path")
-    parser.add_argument("--interval-sec", type=float, default=1.0, help="Refresh interval seconds")
+    parser.add_argument("--poll-sec", type=float, default=1.0, help="Cache polling interval seconds")
+    parser.add_argument("--interval-sec", type=float, default=None, help="Deprecated alias of --poll-sec")
     parser.add_argument("--monitor-index", type=int, default=1, help="Monitor index")
     parser.add_argument("--margin-right-px", type=int, default=40, help="Right margin in pixels")
     parser.add_argument("--margin-top-px", type=int, default=0, help="Top margin in pixels")
@@ -306,7 +280,7 @@ def main() -> int:
     args = parse_args()
 
     # Windows troubleshooting:
-    # 1) python dm_display_app.py --cache generator_cache.json --out dataset\dm_latest.png --interval-sec 1 --monitor-index 2 --debug
+    # 1) python dm_display_app.py --cache generator_cache.json --out dataset\dm_latest.png --poll-sec 1 --monitor-index 2 --debug
     # 2) In another terminal: Get-FileHash dataset\dm_latest.png (run repeatedly every few seconds)
     # 3) Confirm packet_id / epoch_ms keep increasing in logs and file hash changes over time.
 
@@ -314,9 +288,13 @@ def main() -> int:
         list_monitors()
         return 0
 
+    poll_sec = args.poll_sec if args.interval_sec is None else args.interval_sec
+    if args.interval_sec is not None:
+        logger.warning("--interval-sec is deprecated. Use --poll-sec instead.")
+
     app = DMDisplayApp(
         out_path=Path(args.out),
-        interval_ms=max(100, int(args.interval_sec * 1000)),
+        poll_ms=max(100, int(poll_sec * 1000)),
         monitor_index=args.monitor_index,
         margin_right_px=args.margin_right_px,
         margin_top_px=args.margin_top_px,

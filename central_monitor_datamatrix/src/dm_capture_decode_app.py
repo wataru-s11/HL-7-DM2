@@ -22,8 +22,10 @@ def now_ms() -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Capture ROI and decode DataMatrix on interval")
-    parser.add_argument("--interval-sec", type=float, default=10.0, help="Capture interval seconds")
+    parser = argparse.ArgumentParser(description="Capture ROI and decode DataMatrix when generator cache packet_id changes")
+    parser.add_argument("--cache", default="generator_cache.json", help="Path to generator_cache.json")
+    parser.add_argument("--poll-sec", type=float, default=0.2, help="Cache polling interval seconds")
+    parser.add_argument("--interval-sec", type=float, default=None, help="Deprecated alias of --poll-sec")
     parser.add_argument("--left", type=int, required=True, help="ROI left")
     parser.add_argument("--top", type=int, required=True, help="ROI top")
     parser.add_argument("--width", type=int, required=True, help="ROI width")
@@ -84,12 +86,51 @@ def main() -> int:
         )
 
     logger.info("roi_global=(%d, %d, %d, %d)", roi_left, roi_top, args.width, args.height)
-    logger.info("start capture loop interval=%.2fs roi=(%d,%d,%d,%d)", args.interval_sec, roi_left, roi_top, args.width, args.height)
+    poll_sec = args.poll_sec if args.interval_sec is None else args.interval_sec
+    if args.interval_sec is not None:
+        logger.warning("--interval-sec is deprecated. Use --poll-sec instead.")
+
+    cache_path = Path(args.cache)
+    logger.info(
+        "start capture loop poll=%.2fs roi=(%d,%d,%d,%d) cache=%s",
+        poll_sec,
+        roi_left,
+        roi_top,
+        args.width,
+        args.height,
+        cache_path,
+    )
 
     sequence = 0
+    last_seen_packet_id: int | None = None
+    warned_missing_packet_id = False
 
     try:
         while True:
+            try:
+                cache, _ = dm_datamatrix.load_cache_with_retry(cache_path)
+            except FileNotFoundError:
+                logger.info("cache file not found yet: %s", cache_path)
+                time.sleep(max(0.1, poll_sec))
+                continue
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.warning("failed to read cache %s: %s", cache_path, exc)
+                time.sleep(max(0.1, poll_sec))
+                continue
+
+            packet_id = cache.get("packet_id") if isinstance(cache.get("packet_id"), int) else None
+            if packet_id is None:
+                if not warned_missing_packet_id:
+                    warned_missing_packet_id = True
+                    logger.warning("cache has no packet_id. capture/decode is skipped until packet_id appears: %s", cache_path)
+                time.sleep(max(0.1, poll_sec))
+                continue
+
+            if last_seen_packet_id == packet_id:
+                time.sleep(max(0.1, poll_sec))
+                continue
+
+            last_seen_packet_id = packet_id
             decoded_at_ms = now_ms()
             dt_now = datetime.now()
             # 秒単位ファイル名だと短い間隔で同名上書きが起き、
@@ -103,9 +144,9 @@ def main() -> int:
                 "timestamp_ms": None,
                 "epoch_ms": None,
                 "ts": None,
-                "packet_id": None,
+                "packet_id": packet_id,
                 "cache_epoch_ms": None,
-                "source_packet_id": None,
+                "source_packet_id": packet_id,
                 "truth_packet_id": None,
                 "truth_epoch_ms": None,
                 "truth_ts": None,
@@ -142,9 +183,8 @@ def main() -> int:
                 record["epoch_ms"] = dm_epoch_ms
                 record["timestamp_ms"] = truth_epoch_ms if truth_epoch_ms is not None else (dm_epoch_ms if dm_epoch_ms is not None else decoded_at_ms)
                 record["ts"] = payload.get("ts")
-                record["packet_id"] = payload.get("packet_id")
+                record["decoded_packet_id"] = payload.get("packet_id")
                 record["cache_epoch_ms"] = payload.get("epoch_ms")
-                record["source_packet_id"] = payload.get("packet_id")
                 record["source"] = payload.get("source")
                 record["beds"] = payload.get("beds")
                 record["decode_ok"] = True
@@ -164,7 +204,7 @@ def main() -> int:
                 logger.warning("decode failed: %s (%s)", image_path, exc)
 
             append_jsonl(out_jsonl, record)
-            time.sleep(max(0.1, args.interval_sec))
+            time.sleep(max(0.1, poll_sec))
     except KeyboardInterrupt:
         logger.info("stopped by keyboard interrupt")
         return 0
