@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import cache_io
+import paths as run_paths
 from hl7_sender import send_mllp_message
 
 logger = logging.getLogger(__name__)
@@ -181,11 +182,6 @@ def _release_claim(lock_path: Path | None, fd: int | None) -> None:
         lock_path.unlink(missing_ok=True)
 
 
-def default_truth_path(base_dir: Path, epoch_ms: int) -> Path:
-    day = datetime.fromtimestamp(epoch_ms / 1000.0, tz=timezone.utc).strftime("%Y%m%d")
-    return base_dir / day / "generator_results.jsonl"
-
-
 def main() -> None:
     # NOTE: cacheは単一writer運用が前提です。
     # - シミュレーション時: generator.py のみが cache writer
@@ -198,6 +194,7 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=2575)
     ap.add_argument("--interval", type=float, default=1.0)
     ap.add_argument("--count", type=int, default=-1, help="送信ループ回数(-1で無限)")
+    ap.add_argument("--run-dir", help="出力先フォルダ。未指定時は dataset/YYYYMMDD")
     ap.add_argument("--truth-out", help="truth JSONLの出力先")
     ap.add_argument(
         "--truth-out-default-dataset",
@@ -222,6 +219,9 @@ def main() -> None:
         ap.error("--truth-every-n must be >= 1")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+    run_dir = run_paths.resolve_run_dir(args.run_dir)
+    logger.info("run_dir=%s", run_dir)
 
     msg_id = 1
     beds = [f"BED{i:02d}" for i in range(1, 7)]
@@ -281,9 +281,16 @@ def main() -> None:
         except Exception as exc:
             logger.warning("cache snapshot write failed (will continue next cycle): %s", exc)
 
-        truth_out_path = args.truth_out
-        if not truth_out_path and args.truth_out_default_dataset:
-            truth_out_path = str(default_truth_path(Path("dataset"), cycle_epoch_ms))
+        truth_out_path: str | None = None
+        if args.truth_out:
+            truth_path = run_paths.resolve_in_run_dir(args.truth_out, run_dir)
+            if truth_path is not None:
+                truth_out_path = str(truth_path)
+        else:
+            truth_out_path = str(run_dir / "generator_results.jsonl")
+
+        if args.truth_out_default_dataset:
+            logger.warning("--truth-out-default-dataset is deprecated. run_dir is now used by default.")
 
         if truth_out_path and ((loop + 1) % args.truth_every_n == 0):
             truth_record: dict[str, Any] = {

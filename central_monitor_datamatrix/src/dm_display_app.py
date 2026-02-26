@@ -14,6 +14,7 @@ from PIL import Image, ImageTk
 from screeninfo import get_monitors
 
 import dm_datamatrix
+import paths as run_paths
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +245,8 @@ def parse_args() -> argparse.Namespace:
         default=CacheUpdateMode.GENERATOR,
         help="Cache update strategy: generator=packet_id+epoch_ms, receiver=mtime/epoch_ms fallback",
     )
-    parser.add_argument("--out", default="dataset/dm_latest.png", help="Output PNG path")
+    parser.add_argument("--run-dir", help="Output directory. Default: dataset/YYYYMMDD")
+    parser.add_argument("--out", default=None, help="Output PNG path (relative path is resolved under --run-dir)")
     parser.add_argument("--poll-sec", type=float, default=1.0, help="Cache polling interval seconds")
     parser.add_argument("--interval-sec", type=float, default=None, help="Deprecated alias of --poll-sec")
     parser.add_argument("--monitor-index", type=int, default=1, help="Monitor index")
@@ -292,8 +294,12 @@ def main() -> int:
     if args.interval_sec is not None:
         logger.warning("--interval-sec is deprecated. Use --poll-sec instead.")
 
+    run_dir = run_paths.resolve_run_dir(args.run_dir)
+    logger.info("run_dir=%s", run_dir)
+    out_path = run_paths.resolve_in_run_dir(args.out, run_dir) or (run_dir / "dm_latest.png")
+
     app = DMDisplayApp(
-        out_path=Path(args.out),
+        out_path=out_path,
         poll_ms=max(100, int(poll_sec * 1000)),
         monitor_index=args.monitor_index,
         margin_right_px=args.margin_right_px,
