@@ -242,8 +242,9 @@ class DMDisplayApp:
         self._refresh_png_if_cache_updated()
         try:
             with Image.open(self.out_path) as image:
+                image.load()
                 resized_image = image.resize((WINDOW_WIDTH, WINDOW_HEIGHT), Image.NEAREST)
-            self.photo = ImageTk.PhotoImage(resized_image)
+                self.photo = ImageTk.PhotoImage(resized_image)
             self.image_label.configure(image=self.photo)
         except FileNotFoundError:
             logger.warning("output image not found: %s", self.out_path)
@@ -303,6 +304,11 @@ def list_monitors() -> None:
 def main() -> int:
     logging.basicConfig(level=logging.DEBUG if "--debug" in sys.argv else logging.INFO, format="%(levelname)s: %(message)s")
     args = parse_args()
+
+    # Windows troubleshooting:
+    # 1) python dm_display_app.py --cache generator_cache.json --out dataset\dm_latest.png --interval-sec 1 --monitor-index 2 --debug
+    # 2) In another terminal: Get-FileHash dataset\dm_latest.png (run repeatedly every few seconds)
+    # 3) Confirm packet_id / epoch_ms keep increasing in logs and file hash changes over time.
 
     if args.list_monitors:
         list_monitors()
