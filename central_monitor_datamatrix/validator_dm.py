@@ -285,12 +285,21 @@ def extract_decoded_value(bed_data: dict[str, Any], field: str) -> Any:
 def pick_truth(
     decoded_packet_id: int | None,
     decoded_timestamp_ms: int | None,
+    decoded_truth_epoch_ms: int | None,
     truth_rows: list[dict[str, Any]],
+    truth_by_epoch: dict[int, dict[str, Any]] | None,
     tolerance_sec: float,
     decoded_time_source: str,
+    truth_mode: str,
 ) -> tuple[dict[str, Any] | None, float | None, str]:
     if not truth_rows:
         return None, None, "none"
+
+    if truth_mode == "generator_jsonl" and decoded_truth_epoch_ms is not None and truth_by_epoch is not None:
+        direct = truth_by_epoch.get(decoded_truth_epoch_ms)
+        if direct is not None:
+            return direct, 0.0, "truth_epoch_ms"
+        return None, None, "truth_epoch_ms"
 
     if decoded_packet_id is not None:
         for row in truth_rows:
@@ -411,6 +420,10 @@ def main() -> None:
         truth_rows = load_truth_generator_jsonl(generator_results_path)
         print("[INFO] truth-mode=generator is treated as generator_jsonl compatibility mode.")
 
+    truth_by_epoch: dict[int, dict[str, Any]] | None = None
+    if args.truth_mode == "generator_jsonl":
+        truth_by_epoch = {int(row["epoch_ms"]): row for row in truth_rows}
+
     print(f"[INFO] Loaded truth rows: {len(truth_rows)}")
     decoded_rows = tail_jsonl(decoded_path, args.last)
     print(f"[INFO] Loaded decoded rows: {len(decoded_rows)}")
@@ -448,7 +461,9 @@ def main() -> None:
             if decoded_packet_id is None:
                 decoded_packet_id = normalize_packet_id(rec.get("packet_id"))
 
-            decoded_timestamp_ms = normalize_epoch_ms(rec.get("truth_epoch_ms"))
+            decoded_truth_epoch_ms = normalize_epoch_ms(rec.get("truth_epoch_ms"))
+
+            decoded_timestamp_ms = decoded_truth_epoch_ms
             decoded_time_source = "truth_epoch_ms" if decoded_timestamp_ms is not None else "none"
             if decoded_timestamp_ms is None:
                 decoded_timestamp_ms = normalize_epoch_ms(rec.get("cache_epoch_ms"))
@@ -476,9 +491,12 @@ def main() -> None:
             nearest_truth, delta_t, matched_by = pick_truth(
                 decoded_packet_id,
                 decoded_timestamp_ms,
+                decoded_truth_epoch_ms,
                 truth_rows,
+                truth_by_epoch,
                 args.tolerance_sec,
                 decoded_time_source,
+                args.truth_mode,
             )
             if nearest_truth is None:
                 truth_missing_record_count += 1
