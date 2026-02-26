@@ -44,7 +44,7 @@ def generate_datamatrix_png(
         tf.write(blob)
         bin_file = Path(tf.name)
 
-    tmp_png = out_path.with_name(f"{out_path.name}.tmp.{os.getpid()}.{time.time_ns()}")
+    tmp_png = out_path.with_name(f"{out_path.name}.tmp.{os.getpid()}.{time.time_ns()}.png")
 
     try:
         cmd = [
@@ -64,7 +64,15 @@ def generate_datamatrix_png(
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
         if result.returncode == 0:
-            os.replace(tmp_png, out_path)
+            replace_attempts = 3
+            for attempt in range(1, replace_attempts + 1):
+                try:
+                    os.replace(tmp_png, out_path)
+                    break
+                except PermissionError:
+                    if attempt == replace_attempts:
+                        raise
+                    time.sleep(0.05 * attempt)
         return result
     except subprocess.TimeoutExpired as exc:
         tmp_png.unlink(missing_ok=True)
