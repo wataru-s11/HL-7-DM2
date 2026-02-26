@@ -13,6 +13,7 @@ from PIL import Image
 from PIL import ImageGrab
 
 import dm_datamatrix
+import paths as run_paths
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +32,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--width", type=int, required=True, help="ROI width")
     parser.add_argument("--height", type=int, required=True, help="ROI height")
     parser.add_argument("--monitor-index", type=int, default=None, help="Monitor index for monitor-local ROI coordinates")
-    parser.add_argument("--out-jsonl", default="dataset/decoded_results.jsonl", help="Output JSONL path")
-    parser.add_argument("--captures-dir", default="dataset/captures", help="Captured PNG directory")
+    parser.add_argument("--run-dir", help="Output directory. Default: dataset/YYYYMMDD")
+    parser.add_argument("--out-jsonl", default=None, help="Output JSONL path (relative path is resolved under --run-dir)")
+    parser.add_argument("--captures-dir", default=None, help="Captured PNG directory (relative path is resolved under --run-dir)")
     return parser.parse_args()
 
 
@@ -58,9 +60,21 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     args = parse_args()
 
-    captures_dir = Path(args.captures_dir)
+    run_dir = run_paths.resolve_run_dir(args.run_dir)
+    logger.info("run_dir=%s", run_dir)
+
+    out_jsonl_arg = args.out_jsonl
+    if out_jsonl_arg == "dataset/decoded_results.jsonl":
+        logger.warning("legacy --out-jsonl=dataset/decoded_results.jsonl is redirected to run_dir/decoded_results.jsonl")
+        out_jsonl_arg = None
+    out_jsonl = run_paths.resolve_in_run_dir(out_jsonl_arg, run_dir) or (run_dir / "decoded_results.jsonl")
+
+    captures_arg = args.captures_dir
+    if captures_arg == "dataset/captures":
+        logger.warning("legacy --captures-dir=dataset/captures is redirected to run_dir/captures")
+        captures_arg = None
+    captures_dir = run_paths.resolve_in_run_dir(captures_arg, run_dir) or (run_dir / "captures")
     captures_dir.mkdir(parents=True, exist_ok=True)
-    out_jsonl = Path(args.out_jsonl)
 
     roi_left = args.left
     roi_top = args.top

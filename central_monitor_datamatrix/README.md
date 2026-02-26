@@ -42,7 +42,7 @@ python src/decode_datamatrix_png.py --image dataset/dm.png
 ### 1) HL7データ生成（任意）
 
 ```bash
-python src/generator.py --host 127.0.0.1 --port 2575 --interval 1.0 --cache-out generator_cache.json --truth-out dataset/20260225/generator_results.jsonl
+python src/generator.py --run-dir dataset/20260226 --host 127.0.0.1 --port 2575 --interval 1.0 --cache-out generator_cache.json
 ```
 
 ### 2) HL7 receiver起動（cache更新）
@@ -53,10 +53,10 @@ python src/hl7_receiver.py --host 0.0.0.0 --port 2575 --cache receiver_cache.jso
 
 ### 3) 送信側アプリ: DataMatrix小窓表示
 
-cacheファイルの更新mtimeを監視し、更新時に `dataset/dm_latest.png` を再生成して表示更新します。
+cacheファイルの更新mtimeを監視し、更新時に `run_dir/dm_latest.png` を再生成して表示更新します。
 
 ```bash
-python src/dm_display_app.py --cache generator_cache.json --out dataset/dm_latest.png --interval-sec 1 --monitor-index 1 --margin-right-px 40
+python src/dm_display_app.py --run-dir dataset/20260226 --cache generator_cache.json --interval-sec 1 --monitor-index 1 --margin-right-px 40
 ```
 
 - デフォルトサイズは `420x420` 固定
@@ -66,11 +66,11 @@ python src/dm_display_app.py --cache generator_cache.json --out dataset/dm_lates
 ### 4) 受信側アプリ: 10秒ごとキャプチャ→decode→JSONL
 
 ```bash
-python src/dm_capture_decode_app.py --interval-sec 10 --left 1400 --top 20 --width 420 --height 420 --out-jsonl dataset/decoded_results.jsonl
+python src/dm_capture_decode_app.py --run-dir dataset/20260226 --interval-sec 10 --left 1400 --top 20 --width 420 --height 420
 ```
 
-- 保存画像: `dataset/captures/YYYYMMDD_HHMMSS.png`
-- JSONL: 1行1レコード（`epoch_ms`, `timestamp_ms`, `ts`, `packet_id`, `decoded_at_ms`, `source_image`, `decode_ok`, `crc_ok`, `beds`）
+- 保存画像: `run_dir/captures/YYYYMMDD_HHMMSS_mmm_xxxxxx.png`
+- JSONL: `run_dir/decoded_results.jsonl` に1行1レコード（`epoch_ms`, `timestamp_ms`, `ts`, `packet_id`, `decoded_at_ms`, `source_image`, `decode_ok`, `crc_ok`, `beds`）
 - decode失敗時は `decode_ok:false` と `error` を記録（プロセスは継続）
 
 ## ROI決めのコツ
@@ -83,8 +83,8 @@ python src/dm_capture_decode_app.py --interval-sec 10 --left 1400 --top 20 --wid
 ## 動作確認手順（最小）
 
 1) `dm_display_app.py` を起動してDataMatrix小窓が表示されることを確認
-2) `dm_capture_decode_app.py` を起動して10秒ごとに `dataset/captures/*.png` が増えることを確認
-3) `dataset/decoded_results.jsonl` が追記され、成功時は `decode_ok:true` / `crc_ok:true` になることを確認
+2) `dm_capture_decode_app.py` を起動して10秒ごとに `dataset/YYYYMMDD/captures/*.png` が増えることを確認
+3) `dataset/YYYYMMDD/decoded_results.jsonl` が追記され、成功時は `decode_ok:true` / `crc_ok:true` になることを確認
 
 
 ## 検証ワークフロー（packet_id優先の1:1突合）
@@ -95,7 +95,7 @@ python src/dm_capture_decode_app.py --interval-sec 10 --left 1400 --top 20 --wid
 4. `validator_dm.py` を `cache_snapshot_jsonl` モードで実行して評価
 
 ```bash
-python validator_dm.py --decoded-results dataset/decoded_results.jsonl --truth-mode cache_snapshot_jsonl --cache-snapshots dataset/20260225/cache_snapshots.jsonl --out dataset/dm_validation_results.jsonl --summary-out dataset/dm_validation_summary.json --last 200 --tolerance-sec 2.0 --debug-one
+python validator_dm.py --run-dir dataset/20260226 --truth-mode cache_snapshot_jsonl --cache-snapshots cache_snapshots.jsonl --decoded-results decoded_results.jsonl --out dm_validation_results.jsonl --summary-out dm_validation_summary.json --last 200 --tolerance-sec 2.0 --debug-one
 ```
 
 - `validator_dm.py` は `packet_id` 完全一致を最優先し、無い場合は `epoch_ms` で近傍一致します（`--tolerance-sec` は補助）。
@@ -111,3 +111,13 @@ python validator_dm.py --decoded-results dataset/decoded_results.jsonl --truth-m
 
 これにより generator/receiver が同じ cache を同時上書きせず、Windows の `WinError 5` を回避しやすくしています。
 さらに atomic write は固定tmp名を廃止し、`PID + thread_id + random` tmp名と `PermissionError` リトライ付きに強化しています。
+
+
+## run_dir統一の推奨実行例
+
+```bash
+python src/generator.py --run-dir dataset/20260226 --cache-out generator_cache.json --interval 1.0
+python src/dm_display_app.py --run-dir dataset/20260226 --cache generator_cache.json --monitor-index 1
+python src/dm_capture_decode_app.py --run-dir dataset/20260226 --left 1400 --top 20 --width 420 --height 420
+python validator_dm.py --run-dir dataset/20260226 --truth-mode generator_jsonl
+```

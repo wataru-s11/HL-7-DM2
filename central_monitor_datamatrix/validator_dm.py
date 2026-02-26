@@ -8,8 +8,16 @@ from bisect import bisect_left
 from collections import Counter, deque
 from datetime import datetime
 from pathlib import Path
+import sys
 from statistics import median
 from typing import Any, Iterable
+
+BASE_DIR = Path(__file__).resolve().parent
+SRC_DIR = BASE_DIR / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+import paths as run_paths
 
 BED_IDS = [f"BED{i:02d}" for i in range(1, 7)]
 VITAL_ORDER = [
@@ -39,17 +47,18 @@ NUM_RE = re.compile(r"[-+]?\d*\.?\d+")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate DataMatrix decode results against truth data")
-    parser.add_argument("--decoded-results", required=True, help="Decoded results JSONL path")
+    parser.add_argument("--run-dir", help="Run directory for all IO. Default: dataset/YYYYMMDD")
+    parser.add_argument("--decoded-results", default="decoded_results.jsonl", help="Decoded results JSONL path (relative path is resolved under --run-dir)")
     parser.add_argument(
         "--truth-mode",
         required=True,
         choices=["cache", "generator", "generator_jsonl", "cache_snapshot_jsonl"],
     )
     parser.add_argument("--monitor-cache-dir", help="Directory containing monitor cache snapshots (legacy)")
-    parser.add_argument("--generator-results", help="Generator truth JSONL path")
+    parser.add_argument("--generator-results", help="Generator truth JSONL path (default: run_dir/generator_results.jsonl)")
     parser.add_argument("--cache-snapshots", help="cache_snapshots.jsonl path")
-    parser.add_argument("--out", required=True, help="Detailed result JSONL path")
-    parser.add_argument("--summary-out", required=True, help="Summary JSON path")
+    parser.add_argument("--out", default="dm_validation_results.jsonl", help="Detailed result JSONL path (relative path is resolved under --run-dir)")
+    parser.add_argument("--summary-out", default="dm_validation_summary.json", help="Summary JSON path (relative path is resolved under --run-dir)")
     parser.add_argument("--last", type=int, help="Evaluate only the last N decoded records")
     parser.add_argument("--tolerance-sec", type=float, default=2.0, help="Max timestamp delta for truth matching")
     parser.add_argument("--config", default="validator_dm_config.json", help="Config JSON path")
@@ -352,19 +361,36 @@ def print_debug_one(truth_row: dict[str, Any], decoded_beds: dict[str, Any]) -> 
 def main() -> None:
     args = parse_args()
 
-    decoded_path = Path(args.decoded_results)
-    out_path = Path(args.out)
-    summary_path = Path(args.summary_out)
-    config_path = Path(args.config)
+    run_dir = run_paths.resolve_run_dir(args.run_dir)
+    print(f"[INFO] run_dir={run_dir}")
+
+    decoded_path = run_paths.resolve_in_run_dir(args.decoded_results, run_dir)
+    out_path = run_paths.resolve_in_run_dir(args.out, run_dir)
+    summary_path = run_paths.resolve_in_run_dir(args.summary_out, run_dir)
+    config_path = run_paths.resolve_in_run_dir(args.config, run_dir)
+
+    assert decoded_path is not None
+    assert out_path is not None
+    assert summary_path is not None
+    assert config_path is not None
 
     if not decoded_path.exists():
         raise FileNotFoundError(f"decoded-results not found: {decoded_path}")
 
-    if args.truth_mode == "cache_snapshot_jsonl" and not args.cache_snapshots:
+    cache_snapshots_path = run_paths.resolve_in_run_dir(args.cache_snapshots, run_dir)
+    generator_results_path = run_paths.resolve_in_run_dir(args.generator_results, run_dir)
+    if args.truth_mode in {"generator", "generator_jsonl"} and generator_results_path is None:
+        generator_results_path = run_dir / "generator_results.jsonl"
+        if not generator_results_path.exists():
+            raise FileNotFoundError(
+                "generator truth file not found. Provide --generator-results or place generator_results.jsonl under --run-dir: "
+                f"{generator_results_path}"
+            )
+    monitor_cache_dir_path = run_paths.resolve_in_run_dir(args.monitor_cache_dir, run_dir)
+
+    if args.truth_mode == "cache_snapshot_jsonl" and cache_snapshots_path is None:
         raise ValueError("--cache-snapshots is required when --truth-mode=cache_snapshot_jsonl")
-    if args.truth_mode in {"generator", "generator_jsonl"} and not args.generator_results:
-        raise ValueError("--generator-results is required when --truth-mode=generator/generator_jsonl")
-    if args.truth_mode == "cache" and not args.monitor_cache_dir:
+    if args.truth_mode == "cache" and monitor_cache_dir_path is None:
         raise ValueError("--monitor-cache-dir is required when --truth-mode=cache")
 
     config = load_or_create_config(config_path)
@@ -373,16 +399,16 @@ def main() -> None:
     vital_ranges = config.get("vital_ranges", {})
 
     if args.truth_mode == "cache_snapshot_jsonl":
-        truth_rows = load_truth_cache_snapshot_jsonl(Path(args.cache_snapshots))
+        truth_rows = load_truth_cache_snapshot_jsonl(cache_snapshots_path)
         print("[INFO] Using truth mode: cache_snapshot_jsonl (recommended)")
     elif args.truth_mode == "generator_jsonl":
-        truth_rows = load_truth_generator_jsonl(Path(args.generator_results))
+        truth_rows = load_truth_generator_jsonl(generator_results_path)
         print("[INFO] Using truth mode: generator_jsonl (compatible). Consider cache_snapshot_jsonl for strict 1:1 matching.")
     elif args.truth_mode == "cache":
-        truth_rows = load_truth_cache(Path(args.monitor_cache_dir))
+        truth_rows = load_truth_cache(monitor_cache_dir_path)
         print("[INFO] Using truth mode: cache (legacy). Consider cache_snapshot_jsonl.")
     else:
-        truth_rows = load_truth_generator_jsonl(Path(args.generator_results))
+        truth_rows = load_truth_generator_jsonl(generator_results_path)
         print("[INFO] truth-mode=generator is treated as generator_jsonl compatibility mode.")
 
     print(f"[INFO] Loaded truth rows: {len(truth_rows)}")
