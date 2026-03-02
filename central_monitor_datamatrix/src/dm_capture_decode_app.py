@@ -32,6 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--width", type=int, required=True, help="ROI width")
     parser.add_argument("--height", type=int, required=True, help="ROI height")
     parser.add_argument("--monitor-index", type=int, default=None, help="Monitor index for monitor-local ROI coordinates")
+    parser.add_argument("--work-root", default=None, help="Working root. Default: C:/Users/sakai/HL7_DM_test")
     parser.add_argument("--run-dir", help="Output directory. Default: dataset/YYYYMMDD")
     parser.add_argument("--out-jsonl", default=None, help="Output JSONL path (relative path is resolved under --run-dir)")
     parser.add_argument("--captures-dir", default=None, help="Captured PNG directory (relative path is resolved under --run-dir)")
@@ -60,7 +61,9 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     args = parse_args()
 
-    run_dir = run_paths.resolve_run_dir(args.run_dir)
+    work_root = run_paths.resolve_work_root(args.work_root)
+    run_dir = run_paths.resolve_run_dir(args.run_dir, work_root=work_root)
+    logger.info("work_root=%s", work_root)
     logger.info("run_dir=%s", run_dir)
 
     out_jsonl_arg = args.out_jsonl
@@ -104,7 +107,7 @@ def main() -> int:
     if args.interval_sec is not None:
         logger.warning("--interval-sec is deprecated. Use --poll-sec instead.")
 
-    cache_path = Path(args.cache)
+    cache_path = run_paths.resolve_work_path(args.cache, work_root)
     logger.info(
         "start capture loop poll=%.2fs roi=(%d,%d,%d,%d) cache=%s",
         poll_sec,

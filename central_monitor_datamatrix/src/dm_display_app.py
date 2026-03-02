@@ -245,6 +245,7 @@ def parse_args() -> argparse.Namespace:
         default=CacheUpdateMode.GENERATOR,
         help="Cache update strategy: generator=packet_id+epoch_ms, receiver=mtime/epoch_ms fallback",
     )
+    parser.add_argument("--work-root", default=None, help="Working root. Default: C:/Users/sakai/HL7_DM_test")
     parser.add_argument("--run-dir", help="Output directory. Default: dataset/YYYYMMDD")
     parser.add_argument("--out", default=None, help="Output PNG path (relative path is resolved under --run-dir)")
     parser.add_argument("--poll-sec", type=float, default=1.0, help="Cache polling interval seconds")
@@ -294,7 +295,9 @@ def main() -> int:
     if args.interval_sec is not None:
         logger.warning("--interval-sec is deprecated. Use --poll-sec instead.")
 
-    run_dir = run_paths.resolve_run_dir(args.run_dir)
+    work_root = run_paths.resolve_work_root(args.work_root)
+    run_dir = run_paths.resolve_run_dir(args.run_dir, work_root=work_root)
+    logger.info("work_root=%s", work_root)
     logger.info("run_dir=%s", run_dir)
     out_path = run_paths.resolve_in_run_dir(args.out, run_dir) or (run_dir / "dm_latest.png")
 
@@ -307,7 +310,7 @@ def main() -> int:
         cache_type=args.cache_type,
         debug=args.debug,
     )
-    app.set_cache_path(Path(args.cache))
+    app.set_cache_path(run_paths.resolve_work_path(args.cache, work_root))
     app.run()
     return 0
 
