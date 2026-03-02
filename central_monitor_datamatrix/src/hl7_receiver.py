@@ -112,15 +112,26 @@ def _handle_client(conn: socket.socket, aggregator: BedDataAggregator, cache_pat
         data = conn.recv(65535)
         message = _extract_mllp_payload(data)
         if not message:
+            conn.sendall(SB + b"MSA|AE|EMPTY" + EB_CR)
             return
-        parsed = parse_hl7_message(message)
+
+        try:
+            parsed = parse_hl7_message(message)
+        except Exception as exc:
+            logger.warning("failed to parse HL7 message: %s", exc)
+            conn.sendall(SB + b"MSA|AE|PARSE_ERROR" + EB_CR)
+            return
+
         with aggregator.lock:
             aggregator.update_from_parsed(parsed)
-            try:
-                _write_cache_atomic(cache_path, aggregator.snapshot())
-            except Exception as exc:
-                logger.warning("cache update failed (skip this tick): %s", exc)
+            snapshot = aggregator.snapshot()
+
         conn.sendall(SB + b"MSA|AA|OK" + EB_CR)
+
+        try:
+            _write_cache_atomic(cache_path, snapshot)
+        except Exception as exc:
+            logger.warning("cache update failed after ACK (skip this tick): %s", exc)
     finally:
         conn.close()
 
