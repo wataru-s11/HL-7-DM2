@@ -2,6 +2,8 @@
 
 HL7受信で得たベッド別vitalsを、PHIを含まないDataMatrixペイロードに変換し、監視GUI右下へ表示・スクショ画像からデコードしてJSONL保存する最小実装です。
 
+> 運用を `src/` 配下へ一本化するため、リポジトリ直下にあった旧 `hl7_receiver.py` / `hl7_parser.py` / `generator.py` は削除しています。以後は `central_monitor_datamatrix/src/` 配下の同名スクリプトを利用してください。
+
 ## 追加/主要ファイル
 
 - `src/dm_payload.py`: 6ベッド×20パラメータ固定レイアウトのバイナリpacket生成/復元
