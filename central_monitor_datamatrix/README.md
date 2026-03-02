@@ -46,16 +46,16 @@ python src/decode_datamatrix_png.py --image dataset/dm.png
 
 ## Sender/Receiver 実行手順（推奨）
 
-### 1) HL7データ生成（任意）
-
-```bash
-python src/generator.py --run-dir dataset/20260226 --host 127.0.0.1 --port 2575 --interval 1.0 --cache-out generator_cache.json
-```
-
-### 2) HL7 receiver起動（cache更新）
+### 1) HL7 receiver起動（先に起動）
 
 ```bash
 python src/hl7_receiver.py --host 0.0.0.0 --port 2575 --cache receiver_cache.json
+```
+
+### 2) HL7データ生成（receiver起動後）
+
+```bash
+python src/generator.py --run-dir dataset/20260226 --host 127.0.0.1 --port 2575 --interval 1.0 --cache-out generator_cache.json
 ```
 
 ### 3) 送信側アプリ: DataMatrix小窓表示
@@ -79,6 +79,23 @@ python src/dm_capture_decode_app.py --run-dir dataset/20260226 --interval-sec 10
 - 保存画像: `run_dir/captures/YYYYMMDD_HHMMSS_mmm_xxxxxx.png`
 - JSONL: `run_dir/decoded_results.jsonl` に1行1レコード（`epoch_ms`, `timestamp_ms`, `ts`, `packet_id`, `decoded_at_ms`, `source_image`, `decode_ok`, `crc_ok`, `beds`）
 - decode失敗時は `decode_ok:false` と `error` を記録（プロセスは継続）
+
+
+## 接続警告（receiver not reachable）が出るとき
+
+`generator.py` 実行時に次の警告が出る場合は、receiver が未起動か接続先ホストが誤っています。
+
+- `send failed ... (receiver not reachable at 127.0.0.1:2575)`
+- `hint: 127.0.0.1 is local-only ...`
+
+対処:
+
+1. 同一PC上で実行する場合
+   - 先に `python src/hl7_receiver.py --host 0.0.0.0 --port 2575` を起動
+   - その後 `python src/generator.py --host 127.0.0.1 --port 2575` を起動
+2. 別PCへ送る場合（NAS上の共有パスから実行するケースを含む）
+   - receiver 側: `--host 0.0.0.0` で待受
+   - generator 側: `--host <receiver_machine_ip>` を指定（`127.0.0.1` は使わない）
 
 ## ROI決めのコツ
 
