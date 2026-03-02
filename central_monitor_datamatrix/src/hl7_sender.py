@@ -22,14 +22,25 @@ def send_mllp_message_with_error(
         with socket.create_connection((host, port), timeout=timeout) as s:
             s.settimeout(timeout)
             s.sendall(payload)
+            # Some receivers only start ACK processing after EOF on request stream.
+            # Half-close write side so ACK can be returned without waiting for a full close.
+            s.shutdown(socket.SHUT_WR)
+            ack_chunks: list[bytes] = []
             try:
-                ack = s.recv(1024)
+                while True:
+                    chunk = s.recv(1024)
+                    if not chunk:
+                        break
+                    ack_chunks.append(chunk)
+                    if EB_CR in chunk or b"\x1c" in chunk:
+                        break
             except TimeoutError:
                 return (
                     False,
                     "connection established but ACK timed out "
                     "(receiver may not return MLLP ACK quickly enough for current timeout)",
                 )
+        ack = b"".join(ack_chunks)
         if not ack:
             return False, "connection established but no ACK returned"
         return True, None
