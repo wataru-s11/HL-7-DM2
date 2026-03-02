@@ -97,6 +97,11 @@ python src/dm_capture_decode_app.py --run-dir dataset/20260226 --interval-sec 10
    - receiver 側: `--host 0.0.0.0` で待受
    - generator 側: `--host <receiver_machine_ip>` を指定（`127.0.0.1` は使わない）
 
+補足:
+
+- `src/generator.py` は、`127.0.0.1` 宛で失敗した場合に、このPCで検出できた IPv4 候補を警告ログに表示します。
+- 表示されたIPが receiver 側PCのIPではない場合は、receiver 側で `ipconfig` / `ifconfig` などを実行して正しいIPを指定してください。
+
 ## ROI決めのコツ
 
 - まず `dm_display_app.py` の座標を固定し、その同じ座標を `dm_capture_decode_app.py` のROIに設定する。

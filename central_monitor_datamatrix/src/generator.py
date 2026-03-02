@@ -206,6 +206,20 @@ def _log_receiver_startup_hint(host: str, port: int) -> None:
         )
 
 
+def _local_ipv4_candidates() -> list[str]:
+    candidates: list[str] = []
+    try:
+        for _, _, _, _, sockaddr in socket.getaddrinfo(socket.gethostname(), None, family=socket.AF_INET):
+            ip = sockaddr[0]
+            if ip.startswith("127."):
+                continue
+            if ip not in candidates:
+                candidates.append(ip)
+    except OSError:
+        return []
+    return candidates
+
+
 def main() -> None:
     # NOTE: cacheは単一writer運用が前提です。
     # - シミュレーション時: generator.py のみが cache writer
@@ -297,6 +311,17 @@ def main() -> None:
                         "hint: 127.0.0.1 is local-only. If receiver runs on another machine (e.g., launching scripts from NAS path), "
                         "start receiver with '--host 0.0.0.0' and set generator '--host <receiver_machine_ip>'."
                     )
+                    candidates = _local_ipv4_candidates()
+                    if candidates:
+                        logger.warning(
+                            "hint: detected local IPv4 candidates on this machine: %s",
+                            ", ".join(candidates),
+                        )
+                        logger.warning(
+                            "hint: example: python src/generator.py --host %s --port %d",
+                            candidates[0],
+                            args.port,
+                        )
                     receiver_hint_logged = True
             msg_id += 1
 
