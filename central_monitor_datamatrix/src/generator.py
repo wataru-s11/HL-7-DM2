@@ -248,6 +248,17 @@ def _log_remote_receiver_hint(host: str, port: int) -> bool:
     return True
 
 
+def _log_ack_timeout_hint(host: str, port: int, ack_timeout: float) -> None:
+    logger.warning(
+        "hint: ACK wait timeout is %.1fs. If receiver is busy or ACK is delayed, try '--ack-timeout' with a larger value.",
+        ack_timeout,
+    )
+    logger.warning(
+        "hint: receiver should return an MLLP ACK (MSA|AA...). confirm the receiver process is central_monitor_datamatrix/src/hl7_receiver.py"
+    )
+    _log_remote_receiver_hint(host, port)
+
+
 def main() -> None:
     # NOTE: cacheは単一writer運用が前提です。
     # - シミュレーション時: generator.py のみが cache writer
@@ -259,6 +270,7 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=2575)
     ap.add_argument("--interval", type=float, default=1.0)
+    ap.add_argument("--ack-timeout", type=float, default=3.0, help="ACK待機タイムアウト秒")
     ap.add_argument("--count", type=int, default=-1, help="送信ループ回数(-1で無限)")
     ap.add_argument("--run-dir", help="出力先フォルダ。未指定時は dataset/YYYYMMDD")
     ap.add_argument("--truth-out", help="truth JSONLの出力先")
@@ -283,6 +295,8 @@ def main() -> None:
 
     if args.truth_every_n < 1:
         ap.error("--truth-every-n must be >= 1")
+    if args.ack_timeout <= 0:
+        ap.error("--ack-timeout must be > 0")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -331,7 +345,12 @@ def main() -> None:
                 hl7_messages.append(message)
 
             if receiver_reachable:
-                ok, send_error = send_mllp_message_with_error(args.host, args.port, message)
+                ok, send_error = send_mllp_message_with_error(
+                    args.host,
+                    args.port,
+                    message,
+                    timeout=args.ack_timeout,
+                )
                 if ok:
                     logger.info("sent message_id=MSG%06d bed=%s", msg_id, bed)
                 else:
@@ -344,7 +363,10 @@ def main() -> None:
                         args.port,
                         detail,
                     )
-                    if not receiver_hint_logged:
+                    if send_error and "ACK timed out" in send_error:
+                        _log_ack_timeout_hint(args.host, args.port, args.ack_timeout)
+                        receiver_hint_logged = True
+                    elif not receiver_hint_logged:
                         receiver_hint_logged = _log_remote_receiver_hint(args.host, args.port)
             elif not receiver_hint_logged:
                 receiver_hint_logged = _log_remote_receiver_hint(args.host, args.port)
