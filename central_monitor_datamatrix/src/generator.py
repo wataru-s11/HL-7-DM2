@@ -286,6 +286,13 @@ def main() -> None:
         cycle_epoch_ms = cycle_now_ms
         cycle_beds: dict[str, dict[str, Any]] = {}
         hl7_messages: list[str] = []
+        receiver_reachable = _can_connect(args.host, args.port)
+        if not receiver_reachable:
+            logger.warning(
+                "receiver unreachable for this cycle (%s:%d). will still generate cache/truth but skip MLLP send.",
+                args.host,
+                args.port,
+            )
 
         for bed in beds:
             payload = build_bed_payload()
@@ -295,34 +302,52 @@ def main() -> None:
             if args.truth_include_hl7:
                 hl7_messages.append(message)
 
-            ok = send_mllp_message(args.host, args.port, message)
-            if ok:
-                logger.info("sent message_id=MSG%06d bed=%s", msg_id, bed)
-            else:
-                logger.warning(
-                    "send failed message_id=MSG%06d bed=%s (receiver not reachable at %s:%d)",
-                    msg_id,
-                    bed,
-                    args.host,
-                    args.port,
-                )
-                if not receiver_hint_logged and args.host in {"127.0.0.1", "localhost"}:
+            if receiver_reachable:
+                ok = send_mllp_message(args.host, args.port, message)
+                if ok:
+                    logger.info("sent message_id=MSG%06d bed=%s", msg_id, bed)
+                else:
                     logger.warning(
-                        "hint: 127.0.0.1 is local-only. If receiver runs on another machine (e.g., launching scripts from NAS path), "
-                        "start receiver with '--host 0.0.0.0' and set generator '--host <receiver_machine_ip>'."
+                        "send failed message_id=MSG%06d bed=%s (receiver not reachable at %s:%d)",
+                        msg_id,
+                        bed,
+                        args.host,
+                        args.port,
                     )
-                    candidates = _local_ipv4_candidates()
-                    if candidates:
+                    if not receiver_hint_logged and args.host in {"127.0.0.1", "localhost"}:
                         logger.warning(
-                            "hint: detected local IPv4 candidates on this machine: %s",
-                            ", ".join(candidates),
+                            "hint: 127.0.0.1 is local-only. If receiver runs on another machine (e.g., launching scripts from NAS path), "
+                            "start receiver with '--host 0.0.0.0' and set generator '--host <receiver_machine_ip>'."
                         )
-                        logger.warning(
-                            "hint: example: python src/generator.py --host %s --port %d",
-                            candidates[0],
-                            args.port,
-                        )
-                    receiver_hint_logged = True
+                        candidates = _local_ipv4_candidates()
+                        if candidates:
+                            logger.warning(
+                                "hint: detected local IPv4 candidates on this machine: %s",
+                                ", ".join(candidates),
+                            )
+                            logger.warning(
+                                "hint: example: python src/generator.py --host %s --port %d",
+                                candidates[0],
+                                args.port,
+                            )
+                        receiver_hint_logged = True
+            elif not receiver_hint_logged and args.host in {"127.0.0.1", "localhost"}:
+                logger.warning(
+                    "hint: 127.0.0.1 is local-only. If receiver runs on another machine (e.g., launching scripts from NAS path), "
+                    "start receiver with '--host 0.0.0.0' and set generator '--host <receiver_machine_ip>'."
+                )
+                candidates = _local_ipv4_candidates()
+                if candidates:
+                    logger.warning(
+                        "hint: detected local IPv4 candidates on this machine: %s",
+                        ", ".join(candidates),
+                    )
+                    logger.warning(
+                        "hint: example: python src/generator.py --host %s --port %d",
+                        candidates[0],
+                        args.port,
+                    )
+                receiver_hint_logged = True
             msg_id += 1
 
         packet_id += 1
