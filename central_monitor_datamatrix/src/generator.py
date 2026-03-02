@@ -6,6 +6,7 @@ import logging
 import os
 import random
 import socket
+import sys
 import time
 import atexit
 from datetime import datetime, timedelta, timezone
@@ -220,6 +221,33 @@ def _local_ipv4_candidates() -> list[str]:
     return candidates
 
 
+def _generator_example_command(ip: str, port: int) -> str:
+    launcher = "py" if os.name == "nt" else "python"
+    script = Path(sys.argv[0]).name if sys.argv else "generator.py"
+    return f"{launcher} {script} --host {ip} --port {port}"
+
+
+def _log_remote_receiver_hint(host: str, port: int) -> bool:
+    if host not in {"127.0.0.1", "localhost"}:
+        return False
+
+    logger.warning(
+        "hint: 127.0.0.1 is local-only. If receiver runs on another machine (e.g., launching scripts from NAS path), "
+        "start receiver with '--host 0.0.0.0' and set generator '--host <receiver_machine_ip>'."
+    )
+    candidates = _local_ipv4_candidates()
+    if candidates:
+        logger.warning(
+            "hint: detected local IPv4 candidates on this machine: %s",
+            ", ".join(candidates),
+        )
+        logger.warning(
+            "hint: example: %s",
+            _generator_example_command(candidates[0], port),
+        )
+    return True
+
+
 def main() -> None:
     # NOTE: cacheは単一writer運用が前提です。
     # - シミュレーション時: generator.py のみが cache writer
@@ -314,40 +342,10 @@ def main() -> None:
                         args.host,
                         args.port,
                     )
-                    if not receiver_hint_logged and args.host in {"127.0.0.1", "localhost"}:
-                        logger.warning(
-                            "hint: 127.0.0.1 is local-only. If receiver runs on another machine (e.g., launching scripts from NAS path), "
-                            "start receiver with '--host 0.0.0.0' and set generator '--host <receiver_machine_ip>'."
-                        )
-                        candidates = _local_ipv4_candidates()
-                        if candidates:
-                            logger.warning(
-                                "hint: detected local IPv4 candidates on this machine: %s",
-                                ", ".join(candidates),
-                            )
-                            logger.warning(
-                                "hint: example: python src/generator.py --host %s --port %d",
-                                candidates[0],
-                                args.port,
-                            )
-                        receiver_hint_logged = True
-            elif not receiver_hint_logged and args.host in {"127.0.0.1", "localhost"}:
-                logger.warning(
-                    "hint: 127.0.0.1 is local-only. If receiver runs on another machine (e.g., launching scripts from NAS path), "
-                    "start receiver with '--host 0.0.0.0' and set generator '--host <receiver_machine_ip>'."
-                )
-                candidates = _local_ipv4_candidates()
-                if candidates:
-                    logger.warning(
-                        "hint: detected local IPv4 candidates on this machine: %s",
-                        ", ".join(candidates),
-                    )
-                    logger.warning(
-                        "hint: example: python src/generator.py --host %s --port %d",
-                        candidates[0],
-                        args.port,
-                    )
-                receiver_hint_logged = True
+                    if not receiver_hint_logged:
+                        receiver_hint_logged = _log_remote_receiver_hint(args.host, args.port)
+            elif not receiver_hint_logged:
+                receiver_hint_logged = _log_remote_receiver_hint(args.host, args.port)
             msg_id += 1
 
         packet_id += 1
