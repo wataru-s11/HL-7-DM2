@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import random
+import socket
 import time
 import atexit
 import re
@@ -15,7 +16,9 @@ from typing import Any
 
 import cache_io
 import paths as run_paths
-from hl7_sender import send_mllp_message
+
+SB = b"\x0b"
+EB_CR = b"\x1c\x0d"
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +51,63 @@ WRITER_LOCK_TIMEOUT_SEC = 2.0
 CACHE_WRITE_RETRIES = 20
 CACHE_WRITE_RETRY_DELAY_SEC = 0.05
 CACHE_WRITE_RETRY_MAX_DELAY_SEC = 1.0
+SEND_RETRY_BACKOFFS_SEC = (0.2, 0.5, 1.0)
+
+
+def wait_for_port(host: str, port: int, timeout: float) -> bool:
+    if timeout <= 0:
+        return True
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=min(1.0, timeout)):
+                return True
+        except OSError:
+            time.sleep(0.1)
+    return False
+
+
+def _send_mllp_message_once(host: str, port: int, hl7_message: str, timeout: float = 3.0) -> None:
+    payload = SB + hl7_message.encode("utf-8") + EB_CR
+    with socket.create_connection((host, port), timeout=timeout) as conn:
+        conn.sendall(payload)
+        _ = conn.recv(1024)
+
+
+def send_mllp_message_with_retry(host: str, port: int, hl7_message: str, message_id: int, bed: str) -> bool:
+    for attempt in range(1, len(SEND_RETRY_BACKOFFS_SEC) + 2):
+        try:
+            _send_mllp_message_once(host, port, hl7_message)
+            return True
+        except OSError as exc:
+            if attempt > len(SEND_RETRY_BACKOFFS_SEC):
+                logger.warning(
+                    "send failed message_id=MSG%06d bed=%s after %d attempts (%s:%d): %s",
+                    message_id,
+                    bed,
+                    attempt,
+                    host,
+                    port,
+                    exc,
+                )
+                return False
+
+            backoff = SEND_RETRY_BACKOFFS_SEC[attempt - 1]
+            logger.warning(
+                "send retry %d/%d message_id=MSG%06d bed=%s (%s:%d): %s (sleep %.1fs)",
+                attempt,
+                len(SEND_RETRY_BACKOFFS_SEC),
+                message_id,
+                bed,
+                host,
+                port,
+                exc,
+                backoff,
+            )
+            time.sleep(backoff)
+
+    return False
 
 
 def _to_bool(value: str | bool) -> bool:
@@ -276,6 +336,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=2575)
+    ap.add_argument("--wait-timeout", type=float, default=10.0, help="送信開始前にreceiver待機する秒数 (0で待機なし)")
     ap.add_argument("--interval", type=float, default=1.0)
     ap.add_argument("--count", type=int, default=-1, help="送信ループ回数(-1で無限)")
     ap.add_argument("--run-dir", help="出力先フォルダ。未指定時は dataset/YYYYMMDD")
@@ -301,6 +362,8 @@ def main() -> None:
 
     if args.truth_every_n < 1:
         ap.error("--truth-every-n must be >= 1")
+    if args.wait_timeout < 0:
+        ap.error("--wait-timeout must be >= 0")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -323,6 +386,19 @@ def main() -> None:
     if not write_enabled:
         logger.info("running in read-only mode: cache writes are suppressed")
 
+    if args.wait_timeout > 0:
+        logger.info("waiting for receiver at %s:%d (timeout=%.1fs)", args.host, args.port, args.wait_timeout)
+        ready = wait_for_port(args.host, args.port, args.wait_timeout)
+        if ready:
+            logger.info("receiver reachable at %s:%d", args.host, args.port)
+        else:
+            logger.warning(
+                "receiver not reachable within %.1fs at %s:%d; continuing with send retries",
+                args.wait_timeout,
+                args.host,
+                args.port,
+            )
+
     while args.count < 0 or loop < args.count:
         cycle_now_ms = int(datetime.now(JST).timestamp() * 1000)
         cycle_iso = datetime.fromtimestamp(cycle_now_ms / 1000.0, tz=JST).isoformat(timespec="milliseconds")
@@ -338,17 +414,9 @@ def main() -> None:
             if args.truth_include_hl7:
                 hl7_messages.append(message)
 
-            ok = send_mllp_message(args.host, args.port, message)
+            ok = send_mllp_message_with_retry(args.host, args.port, message, msg_id, bed)
             if ok:
                 logger.info("sent message_id=MSG%06d bed=%s", msg_id, bed)
-            else:
-                logger.warning(
-                    "send failed message_id=MSG%06d bed=%s (receiver not reachable at %s:%d)",
-                    msg_id,
-                    bed,
-                    args.host,
-                    args.port,
-                )
             msg_id += 1
 
         packet_id += 1
