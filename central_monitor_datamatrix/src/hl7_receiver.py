@@ -201,6 +201,8 @@ def _handle_client(conn: socket.socket, aggregator: BedDataAggregator, cache_pat
                 except Exception as exc:
                     logger.warning("cache update failed (skip this tick): %s", exc)
         conn.sendall(SB + b"MSA|AA|OK" + EB_CR)
+    except Exception:
+        logger.exception("client handler failed")
     finally:
         conn.close()
 
@@ -216,16 +218,30 @@ def serve(host: str, port: int, cache_path: Path, write_enabled: bool) -> None:
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((host, port))
-        s.listen(5)
-        print(f"HL7 receiver listening on {host}:{port}")
+        try:
+            s.bind((host, port))
+            s.listen(5)
+        except Exception:
+            logger.exception("failed to bind/listen on %s:%d", host, port)
+            raise SystemExit(1)
+
+        logger.info("HL7 receiver listening on %s:%d", host, port)
         while True:
-            conn, _ = s.accept()
-            threading.Thread(
-                target=_handle_client,
-                args=(conn, aggregator, cache_path, write_enabled),
-                daemon=True,
-            ).start()
+            try:
+                conn, _ = s.accept()
+            except Exception:
+                logger.exception("accept failed")
+                continue
+
+            try:
+                threading.Thread(
+                    target=_handle_client,
+                    args=(conn, aggregator, cache_path, write_enabled),
+                    daemon=True,
+                ).start()
+            except Exception:
+                logger.exception("failed to start client handler thread")
+                conn.close()
 
 
 def main() -> None:
