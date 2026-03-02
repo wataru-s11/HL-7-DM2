@@ -5,8 +5,10 @@ import atexit
 import logging
 import os
 import socket
+import subprocess
 import threading
 import time
+import re
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -90,12 +92,89 @@ def _write_cache_atomic(cache_path: Path, payload: Dict[str, Any]) -> None:
     ) from last_exc
 
 
-def claim_single_writer(cache_path: Path, writer_name: str) -> tuple[Path, int]:
+def _extract_pid_from_lock(lock_body: str) -> int | None:
+    match = re.search(r"\bpid=(\d+)\b", lock_body)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _pid_exists_windows(pid: int) -> bool | None:
+    if pid <= 0:
+        return False
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except Exception as exc:
+        logger.warning("failed to verify writer pid=%d via tasklist: %s", pid, exc)
+        return None
+    if result.returncode != 0:
+        logger.warning(
+            "tasklist returned non-zero while checking writer pid=%d: rc=%d stderr=%s",
+            pid,
+            result.returncode,
+            result.stderr.strip(),
+        )
+        return None
+    return f'"{pid}"' in result.stdout
+
+
+def _cleanup_stale_writer_lock(lock_path: Path) -> bool:
+    if not lock_path.exists():
+        return True
+
+    try:
+        lock_body = lock_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception as exc:
+        logger.warning("failed to read existing writer lock %s: %s", lock_path, exc)
+        return True
+
+    pid = _extract_pid_from_lock(lock_body)
+    if pid is None:
+        logger.warning("existing writer lock has no parseable pid; keeping as-is: %s", lock_path)
+        return True
+
+    if os.name != "nt":
+        logger.info("writer lock pid check is Windows-only; keeping existing lock pid=%d", pid)
+        return True
+
+    exists = _pid_exists_windows(pid)
+    if exists is None:
+        return True
+    if exists:
+        logger.info("existing writer lock owner is alive (pid=%d): %s", pid, lock_path)
+        return True
+
+    logger.warning("detected stale writer lock (pid=%d not found); removing: %s", pid, lock_path)
+    try:
+        lock_path.unlink()
+        return True
+    except Exception as exc:
+        logger.warning("failed to remove stale writer lock %s: %s", lock_path, exc)
+        return False
+
+
+def claim_single_writer(cache_path: Path, writer_name: str) -> tuple[Path | None, int | None, bool]:
     writer_lock_path = cache_path.with_name(f"{cache_path.name}.writer.lock")
-    fd = cache_io.acquire_lock(writer_lock_path, timeout_sec=WRITER_LOCK_TIMEOUT_SEC)
+    if not _cleanup_stale_writer_lock(writer_lock_path):
+        return None, None, False
+    try:
+        fd = cache_io.acquire_lock(writer_lock_path, timeout_sec=WRITER_LOCK_TIMEOUT_SEC)
+    except TimeoutError as exc:
+        logger.warning("writer claim timed out; read-only mode enabled: %s", exc)
+        return None, None, False
+
     os.ftruncate(fd, 0)
     os.write(fd, f"writer={writer_name} pid={os.getpid()}\n".encode("utf-8"))
-    return writer_lock_path, fd
+    return writer_lock_path, fd, True
 
 
 def _release_claim(lock_path: Path | None, fd: int | None) -> None:
@@ -107,7 +186,7 @@ def _release_claim(lock_path: Path | None, fd: int | None) -> None:
         lock_path.unlink(missing_ok=True)
 
 
-def _handle_client(conn: socket.socket, aggregator: BedDataAggregator, cache_path: Path) -> None:
+def _handle_client(conn: socket.socket, aggregator: BedDataAggregator, cache_path: Path, write_enabled: bool) -> None:
     try:
         data = conn.recv(65535)
         message = _extract_mllp_payload(data)
@@ -116,20 +195,24 @@ def _handle_client(conn: socket.socket, aggregator: BedDataAggregator, cache_pat
         parsed = parse_hl7_message(message)
         with aggregator.lock:
             aggregator.update_from_parsed(parsed)
-            try:
-                _write_cache_atomic(cache_path, aggregator.snapshot())
-            except Exception as exc:
-                logger.warning("cache update failed (skip this tick): %s", exc)
+            if write_enabled:
+                try:
+                    _write_cache_atomic(cache_path, aggregator.snapshot())
+                except Exception as exc:
+                    logger.warning("cache update failed (skip this tick): %s", exc)
         conn.sendall(SB + b"MSA|AA|OK" + EB_CR)
     finally:
         conn.close()
 
 
-def serve(host: str, port: int, cache_path: Path) -> None:
+def serve(host: str, port: int, cache_path: Path, write_enabled: bool) -> None:
     aggregator = BedDataAggregator()
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    with aggregator.lock:
-        _write_cache_atomic(cache_path, aggregator.snapshot())
+    if write_enabled:
+        with aggregator.lock:
+            _write_cache_atomic(cache_path, aggregator.snapshot())
+    else:
+        logger.info("running in read-only mode: cache writes are suppressed")
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -138,7 +221,11 @@ def serve(host: str, port: int, cache_path: Path) -> None:
         print(f"HL7 receiver listening on {host}:{port}")
         while True:
             conn, _ = s.accept()
-            threading.Thread(target=_handle_client, args=(conn, aggregator, cache_path), daemon=True).start()
+            threading.Thread(
+                target=_handle_client,
+                args=(conn, aggregator, cache_path, write_enabled),
+                daemon=True,
+            ).start()
 
 
 def main() -> None:
@@ -148,6 +235,11 @@ def main() -> None:
     # PowerShell例:
     #   generatorのみ: python generator.py --cache-out generator_cache.json -> python dm_display_app.py --cache generator_cache.json
     #   receiverのみ : python hl7_receiver.py --cache receiver_cache.json -> python dm_display_app.py --cache receiver_cache.json
+    # 最小動作確認(院外PC / PowerShell):
+    #   1) stale lock作成: Set-Content .\receiver_cache.json.writer.lock 'writer=hl7_receiver pid=999999'
+    #   2) receiver起動  : python .\hl7_receiver.py --host 127.0.0.1 --port 2575 --cache receiver_cache.json
+    #   3) generator送信 : python .\generator.py --host 127.0.0.1 --port 2575 --count 1 --cache-out generator_cache.json
+    #   4) ログ確認      : stale lock自動削除 or read-only mode 表示(排他失敗時でも安全継続)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="0.0.0.0")
@@ -157,12 +249,10 @@ def main() -> None:
     cache_path = Path(args.cache)
     claim_lock_path: Path | None = None
     claim_fd: int | None = None
-    try:
-        claim_lock_path, claim_fd = claim_single_writer(cache_path, "hl7_receiver")
-    except TimeoutError as exc:
-        logger.warning("writer claim timed out; continuing without exclusive claim: %s", exc)
+    write_enabled = True
+    claim_lock_path, claim_fd, write_enabled = claim_single_writer(cache_path, "hl7_receiver")
     atexit.register(_release_claim, claim_lock_path, claim_fd)
-    serve(args.host, args.port, cache_path)
+    serve(args.host, args.port, cache_path, write_enabled)
 
 
 if __name__ == "__main__":

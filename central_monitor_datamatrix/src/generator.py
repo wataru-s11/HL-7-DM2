@@ -7,6 +7,8 @@ import os
 import random
 import time
 import atexit
+import re
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -165,12 +167,89 @@ def write_cache_snapshot(cache_path: Path, payload: dict[str, Any]) -> None:
     ) from last_exc
 
 
-def claim_single_writer(cache_path: Path, writer_name: str) -> tuple[Path, int]:
+def _extract_pid_from_lock(lock_body: str) -> int | None:
+    match = re.search(r"\bpid=(\d+)\b", lock_body)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _pid_exists_windows(pid: int) -> bool | None:
+    if pid <= 0:
+        return False
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except Exception as exc:
+        logger.warning("failed to verify writer pid=%d via tasklist: %s", pid, exc)
+        return None
+    if result.returncode != 0:
+        logger.warning(
+            "tasklist returned non-zero while checking writer pid=%d: rc=%d stderr=%s",
+            pid,
+            result.returncode,
+            result.stderr.strip(),
+        )
+        return None
+    return f'"{pid}"' in result.stdout
+
+
+def _cleanup_stale_writer_lock(lock_path: Path) -> bool:
+    if not lock_path.exists():
+        return True
+
+    try:
+        lock_body = lock_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception as exc:
+        logger.warning("failed to read existing writer lock %s: %s", lock_path, exc)
+        return True
+
+    pid = _extract_pid_from_lock(lock_body)
+    if pid is None:
+        logger.warning("existing writer lock has no parseable pid; keeping as-is: %s", lock_path)
+        return True
+
+    if os.name != "nt":
+        logger.info("writer lock pid check is Windows-only; keeping existing lock pid=%d", pid)
+        return True
+
+    exists = _pid_exists_windows(pid)
+    if exists is None:
+        return True
+    if exists:
+        logger.info("existing writer lock owner is alive (pid=%d): %s", pid, lock_path)
+        return True
+
+    logger.warning("detected stale writer lock (pid=%d not found); removing: %s", pid, lock_path)
+    try:
+        lock_path.unlink()
+        return True
+    except Exception as exc:
+        logger.warning("failed to remove stale writer lock %s: %s", lock_path, exc)
+        return False
+
+
+def claim_single_writer(cache_path: Path, writer_name: str) -> tuple[Path | None, int | None, bool]:
     writer_lock_path = cache_path.with_name(f"{cache_path.name}.writer.lock")
-    fd = cache_io.acquire_lock(writer_lock_path, timeout_sec=WRITER_LOCK_TIMEOUT_SEC)
+    if not _cleanup_stale_writer_lock(writer_lock_path):
+        return None, None, False
+    try:
+        fd = cache_io.acquire_lock(writer_lock_path, timeout_sec=WRITER_LOCK_TIMEOUT_SEC)
+    except TimeoutError as exc:
+        logger.warning("writer claim timed out; read-only mode enabled: %s", exc)
+        return None, None, False
+
     os.ftruncate(fd, 0)
     os.write(fd, f"writer={writer_name} pid={os.getpid()}\n".encode("utf-8"))
-    return writer_lock_path, fd
+    return writer_lock_path, fd, True
 
 
 def _release_claim(lock_path: Path | None, fd: int | None) -> None:
@@ -189,6 +268,11 @@ def main() -> None:
     # PowerShell例:
     #   generatorのみ: python generator.py --cache-out generator_cache.json -> python dm_display_app.py --cache generator_cache.json
     #   receiverのみ : python hl7_receiver.py --cache receiver_cache.json -> python dm_display_app.py --cache receiver_cache.json
+    # 最小動作確認(院外PC / PowerShell):
+    #   1) stale lock作成: Set-Content .\generator_cache.json.writer.lock 'writer=generator pid=999999'
+    #   2) receiver起動  : python .\hl7_receiver.py --host 127.0.0.1 --port 2575 --cache receiver_cache.json
+    #   3) generator送信 : python .\generator.py --host 127.0.0.1 --port 2575 --count 1 --cache-out generator_cache.json
+    #   4) ログ確認      : stale lock自動削除 or read-only mode 表示(排他失敗時でも安全継続)
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=2575)
@@ -233,11 +317,11 @@ def main() -> None:
     packet_id = load_packet_id(packet_state_path)
     claim_lock_path: Path | None = None
     claim_fd: int | None = None
-    try:
-        claim_lock_path, claim_fd = claim_single_writer(cache_path, "generator")
-    except TimeoutError as exc:
-        logger.warning("writer claim timed out; continuing without exclusive claim: %s", exc)
+    write_enabled = True
+    claim_lock_path, claim_fd, write_enabled = claim_single_writer(cache_path, "generator")
     atexit.register(_release_claim, claim_lock_path, claim_fd)
+    if not write_enabled:
+        logger.info("running in read-only mode: cache writes are suppressed")
 
     while args.count < 0 or loop < args.count:
         cycle_now_ms = int(datetime.now(JST).timestamp() * 1000)
@@ -275,11 +359,12 @@ def main() -> None:
             "source": "generator",
             "beds": cycle_beds,
         }
-        try:
-            write_cache_snapshot(cache_path, cache_record)
-            save_packet_id(packet_state_path, packet_id)
-        except Exception as exc:
-            logger.warning("cache snapshot write failed (will continue next cycle): %s", exc)
+        if write_enabled:
+            try:
+                write_cache_snapshot(cache_path, cache_record)
+                save_packet_id(packet_state_path, packet_id)
+            except Exception as exc:
+                logger.warning("cache snapshot write failed (will continue next cycle): %s", exc)
 
         truth_out_path: str | None = None
         if args.truth_out:
