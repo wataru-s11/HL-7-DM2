@@ -220,6 +220,8 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+    receiver_hint_logged = False
+
     run_dir = run_paths.resolve_run_dir(args.run_dir)
     logger.info("run_dir=%s", run_dir)
 
@@ -265,6 +267,12 @@ def main() -> None:
                     args.host,
                     args.port,
                 )
+                if not receiver_hint_logged and args.host in {"127.0.0.1", "localhost"}:
+                    logger.warning(
+                        "hint: 127.0.0.1 is local-only. If receiver runs on another machine (e.g., launching scripts from NAS path), "
+                        "start receiver with '--host 0.0.0.0' and set generator '--host <receiver_machine_ip>'."
+                    )
+                    receiver_hint_logged = True
             msg_id += 1
 
         packet_id += 1
