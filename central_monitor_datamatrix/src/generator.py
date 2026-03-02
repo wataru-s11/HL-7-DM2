@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import json
 import logging
 import os
@@ -273,6 +274,7 @@ def main() -> None:
     ap.add_argument("--ack-timeout", type=float, default=3.0, help="ACK待機タイムアウト秒")
     ap.add_argument("--count", type=int, default=-1, help="送信ループ回数(-1で無限)")
     ap.add_argument("--run-dir", help="出力先フォルダ。未指定時は dataset/YYYYMMDD")
+    ap.add_argument("--work-root", default=None, help="作業ルート。未指定時は C:/Users/sakai/HL7_DM_test")
     ap.add_argument("--truth-out", help="truth JSONLの出力先")
     ap.add_argument(
         "--truth-out-default-dataset",
@@ -291,6 +293,7 @@ def main() -> None:
     )
     ap.add_argument("--cache-out", default="generator_cache.json", help="generator用cache出力先 (receiverとは分離推奨)")
     ap.add_argument("--packet-id-state", help="packet_id 永続化ファイルパス（省略時はcache横）")
+    ap.add_argument("--export-root", default=None, help="指定時、最終成果物をこのルートへコピー")
     args = ap.parse_args()
 
     if args.truth_every_n < 1:
@@ -303,7 +306,9 @@ def main() -> None:
     receiver_hint_logged = False
     _log_receiver_startup_hint(args.host, args.port)
 
-    run_dir = run_paths.resolve_run_dir(args.run_dir)
+    work_root = run_paths.resolve_work_root(args.work_root)
+    run_dir = run_paths.resolve_run_dir(args.run_dir, work_root=work_root)
+    logger.info("work_root=%s", work_root)
     logger.info("run_dir=%s", run_dir)
 
     msg_id = 1
@@ -311,8 +316,8 @@ def main() -> None:
     loop = 0
     truth_append_mode = bool(args.append_truth)
 
-    cache_path = Path(args.cache_out)
-    packet_state_path = Path(args.packet_id_state) if args.packet_id_state else cache_path.with_suffix(".packet_id")
+    cache_path = run_paths.resolve_work_path(args.cache_out, work_root)
+    packet_state_path = run_paths.resolve_work_path(args.packet_id_state, work_root, default_rel=cache_path.with_suffix(".packet_id"))
     packet_id = load_packet_id(packet_state_path)
     claim_lock_path: Path | None = None
     claim_fd: int | None = None
@@ -413,6 +418,22 @@ def main() -> None:
 
         loop += 1
         time.sleep(args.interval)
+
+    if args.export_root:
+        export_root = Path(args.export_root).expanduser()
+        export_root.mkdir(parents=True, exist_ok=True)
+        artifacts = [
+            run_dir / "generator_results.jsonl",
+            run_dir / "decoded_results.jsonl",
+            run_dir / "dm_validation_results.jsonl",
+            run_dir / "dm_validation_summary.json",
+            run_dir / "dm_latest.png",
+        ]
+        for src in artifacts:
+            if src.exists():
+                dst = export_root / src.name
+                shutil.copy2(src, dst)
+                logger.info("exported artifact: %s -> %s", src, dst)
 
 
 if __name__ == "__main__":

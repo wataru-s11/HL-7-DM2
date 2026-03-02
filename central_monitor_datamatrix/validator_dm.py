@@ -47,15 +47,16 @@ NUM_RE = re.compile(r"[-+]?\d*\.?\d+")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate DataMatrix decode results against truth data")
+    parser.add_argument("--work-root", default=None, help="Working root. Default: C:/Users/sakai/HL7_DM_test")
     parser.add_argument("--run-dir", help="Run directory for all IO. Default: dataset/YYYYMMDD")
-    parser.add_argument("--decoded-results", default="decoded_results.jsonl", help="Decoded results JSONL path (relative path is resolved under --run-dir)")
+    parser.add_argument("--decoded-results", "--decoded", dest="decoded_results", default="decoded_results.jsonl", help="Decoded results JSONL path (relative path is resolved under --run-dir)")
     parser.add_argument(
         "--truth-mode",
         required=True,
         choices=["cache", "generator", "generator_jsonl", "cache_snapshot_jsonl"],
     )
     parser.add_argument("--monitor-cache-dir", help="Directory containing monitor cache snapshots (legacy)")
-    parser.add_argument("--generator-results", help="Generator truth JSONL path (default: run_dir/generator_results.jsonl)")
+    parser.add_argument("--generator-results", "--generator", dest="generator_results", help="Generator truth JSONL path (default: run_dir/generator_results.jsonl)")
     parser.add_argument("--cache-snapshots", help="cache_snapshots.jsonl path")
     parser.add_argument("--out", default="dm_validation_results.jsonl", help="Detailed result JSONL path (relative path is resolved under --run-dir)")
     parser.add_argument("--summary-out", default="dm_validation_summary.json", help="Summary JSON path (relative path is resolved under --run-dir)")
@@ -370,7 +371,9 @@ def print_debug_one(truth_row: dict[str, Any], decoded_beds: dict[str, Any]) -> 
 def main() -> None:
     args = parse_args()
 
-    run_dir = run_paths.resolve_run_dir(args.run_dir)
+    work_root = run_paths.resolve_work_root(args.work_root)
+    run_dir = run_paths.resolve_run_dir(args.run_dir, work_root=work_root)
+    print(f"[INFO] work_root={work_root}")
     print(f"[INFO] run_dir={run_dir}")
 
     decoded_path = run_paths.resolve_in_run_dir(args.decoded_results, run_dir)

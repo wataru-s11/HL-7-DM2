@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 import cache_io
+import paths as run_paths
 from hl7_parser import parse_hl7_message
 
 SB = b"\x0b"
@@ -178,8 +179,11 @@ def main() -> None:
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=2575)
     ap.add_argument("--cache", default="receiver_cache.json", help="receiver用cache出力先 (generatorとは分離推奨)")
+    ap.add_argument("--work-root", default=None, help="作業ルート。未指定時は C:/Users/sakai/HL7_DM_test")
     args = ap.parse_args()
-    cache_path = Path(args.cache)
+    work_root = run_paths.resolve_work_root(args.work_root)
+    logger.info("work_root=%s", work_root)
+    cache_path = run_paths.resolve_work_path(args.cache, work_root)
     claim_lock_path: Path | None = None
     claim_fd: int | None = None
     try:
