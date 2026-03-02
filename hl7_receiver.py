@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import socket
 import threading
@@ -14,6 +15,11 @@ from hl7_parser import parse_hl7_message
 
 SB = b"\x0b"
 EB_CR = b"\x1c\x0d"
+RECV_TIMEOUT_SEC = 2.0
+RECV_CHUNK_SIZE = 4096
+MAX_MLLP_FRAME_SIZE = 256 * 1024
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -54,14 +60,40 @@ def _write_cache_atomic(cache_path: Path, payload: Dict[str, Any], *, indent: in
 
 def _handle_client(conn: socket.socket, aggregator: BedDataAggregator, cache_path: Path) -> None:
     try:
-        data = conn.recv(65535)
-        message = _extract_mllp_payload(data)
+        conn.settimeout(RECV_TIMEOUT_SEC)
+        buf = b""
+        invalid_frame = False
+        while True:
+            try:
+                chunk = conn.recv(RECV_CHUNK_SIZE)
+            except socket.timeout:
+                invalid_frame = True
+                break
+
+            if not chunk:
+                break
+
+            buf += chunk
+            if EB_CR in buf:
+                break
+            if len(buf) > MAX_MLLP_FRAME_SIZE:
+                invalid_frame = True
+                break
+
+        message = _extract_mllp_payload(buf)
         if not message:
+            invalid_frame = True
+
+        if invalid_frame:
+            conn.sendall(SB + b"MSA|AE|ERR" + EB_CR)
             return
+
         parsed = parse_hl7_message(message)
         aggregator.update_from_parsed(parsed)
         _write_cache_atomic(cache_path, aggregator.snapshot(), indent=2)
         conn.sendall(SB + b"MSA|AA|OK" + EB_CR)
+    except Exception:
+        logger.exception("Error while handling client connection")
     finally:
         conn.close()
 
@@ -82,6 +114,7 @@ def serve(host: str, port: int, cache_path: Path) -> None:
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO)
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=2575)
@@ -92,3 +125,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# Manual test (PowerShell)
+# receiver:  python hl7_receiver.py --host 127.0.0.1 --port 2575 --cache receiver_cache.json
+# generator: python generator.py --host 127.0.0.1 --port 2575 --count 1
+# Confirm generator prints "sent" and receiver logs no exception.
