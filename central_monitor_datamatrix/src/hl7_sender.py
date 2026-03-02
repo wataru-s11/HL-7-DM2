@@ -25,7 +25,11 @@ def send_mllp_message_with_error(
             try:
                 ack = s.recv(1024)
             except TimeoutError:
-                return False, "connection established but ACK timed out"
+                return (
+                    False,
+                    "connection established but ACK timed out "
+                    "(receiver may not return MLLP ACK quickly enough for current timeout)",
+                )
         if not ack:
             return False, "connection established but no ACK returned"
         return True, None
