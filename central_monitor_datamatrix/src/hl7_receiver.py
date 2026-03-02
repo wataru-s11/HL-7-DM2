@@ -109,7 +109,21 @@ def _release_claim(lock_path: Path | None, fd: int | None) -> None:
 
 def _handle_client(conn: socket.socket, aggregator: BedDataAggregator, cache_path: Path) -> None:
     try:
-        data = conn.recv(65535)
+        conn.settimeout(2.0)
+        chunks: list[bytes] = []
+        while True:
+            try:
+                chunk = conn.recv(4096)
+            except TimeoutError:
+                break
+            if not chunk:
+                break
+            chunks.append(chunk)
+            # Stop once a full MLLP frame is received.
+            if EB_CR in chunk or b"\x1c" in chunk:
+                break
+
+        data = b"".join(chunks)
         message = _extract_mllp_payload(data)
         if not message:
             conn.sendall(SB + b"MSA|AE|EMPTY" + EB_CR)
