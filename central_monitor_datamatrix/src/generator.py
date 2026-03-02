@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import random
+import socket
 import time
 import atexit
 from datetime import datetime, timedelta, timezone
@@ -182,6 +183,29 @@ def _release_claim(lock_path: Path | None, fd: int | None) -> None:
         lock_path.unlink(missing_ok=True)
 
 
+def _can_connect(host: str, port: int, timeout_sec: float = 0.8) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout_sec):
+            return True
+    except OSError:
+        return False
+
+
+def _log_receiver_startup_hint(host: str, port: int) -> None:
+    if _can_connect(host, port):
+        return
+
+    logger.warning("receiver is not reachable at startup: %s:%d", host, port)
+    if host in {"127.0.0.1", "localhost"}:
+        logger.warning(
+            "hint(local): start receiver on the same machine first: python hl7_receiver.py --host 0.0.0.0 --port %d",
+            port,
+        )
+        logger.warning(
+            "hint(remote): if receiver runs on another machine, use generator '--host <receiver_machine_ip>' instead of 127.0.0.1"
+        )
+
+
 def main() -> None:
     # NOTE: cacheは単一writer運用が前提です。
     # - シミュレーション時: generator.py のみが cache writer
@@ -221,6 +245,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
     receiver_hint_logged = False
+    _log_receiver_startup_hint(args.host, args.port)
 
     run_dir = run_paths.resolve_run_dir(args.run_dir)
     logger.info("run_dir=%s", run_dir)
