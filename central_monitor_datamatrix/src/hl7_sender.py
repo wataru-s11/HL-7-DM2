@@ -20,13 +20,17 @@ def send_mllp_message_with_error(
     payload = SB + hl7_message.encode("utf-8") + EB_CR
     try:
         with socket.create_connection((host, port), timeout=timeout) as s:
+            s.settimeout(timeout)
             s.sendall(payload)
-            ack = s.recv(1024)
+            try:
+                ack = s.recv(1024)
+            except TimeoutError:
+                return False, "connection established but ACK timed out"
         if not ack:
             return False, "connection established but no ACK returned"
         return True, None
     except TimeoutError:
-        return False, "timed out waiting for ACK"
+        return False, "connection timed out"
     except ConnectionRefusedError:
         return False, "connection refused"
     except OSError as exc:

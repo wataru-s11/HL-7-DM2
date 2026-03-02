@@ -337,7 +337,7 @@ def main() -> None:
                 else:
                     detail = f" ({send_error})" if send_error else ""
                     logger.warning(
-                        "send failed message_id=MSG%06d bed=%s (receiver not reachable at %s:%d)%s",
+                        "send failed message_id=MSG%06d bed=%s (%s:%d)%s",
                         msg_id,
                         bed,
                         args.host,
