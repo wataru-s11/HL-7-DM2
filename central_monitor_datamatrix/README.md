@@ -85,7 +85,8 @@ python src/dm_capture_decode_app.py --run-dir dataset/20260226 --interval-sec 10
 
 `generator.py` 実行時に次の警告が出る場合は、receiver が未起動か接続先ホストが誤っています。
 
-- `send failed ... (receiver not reachable at 127.0.0.1:2575)`
+- `send failed ... (receiver not reachable at 127.0.0.1:2575) (connection refused)`
+- `send failed ... (receiver not reachable at 127.0.0.1:2575) (timed out waiting for ACK)`
 - `hint: 127.0.0.1 is local-only ...`
 
 対処:

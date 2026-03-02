@@ -15,7 +15,7 @@ from typing import Any
 
 import cache_io
 import paths as run_paths
-from hl7_sender import send_mllp_message
+from hl7_sender import send_mllp_message_with_error
 
 logger = logging.getLogger(__name__)
 
@@ -331,16 +331,18 @@ def main() -> None:
                 hl7_messages.append(message)
 
             if receiver_reachable:
-                ok = send_mllp_message(args.host, args.port, message)
+                ok, send_error = send_mllp_message_with_error(args.host, args.port, message)
                 if ok:
                     logger.info("sent message_id=MSG%06d bed=%s", msg_id, bed)
                 else:
+                    detail = f" ({send_error})" if send_error else ""
                     logger.warning(
-                        "send failed message_id=MSG%06d bed=%s (receiver not reachable at %s:%d)",
+                        "send failed message_id=MSG%06d bed=%s (receiver not reachable at %s:%d)%s",
                         msg_id,
                         bed,
                         args.host,
                         args.port,
+                        detail,
                     )
                     if not receiver_hint_logged:
                         receiver_hint_logged = _log_remote_receiver_hint(args.host, args.port)
